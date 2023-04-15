@@ -102,6 +102,22 @@ func someUsefulThings() {
 type User struct {
 	Username string
 
+	// filenames to uuid of file
+	ownedFiles map[string]uuid.UUID
+	// names of people who invited you to the invitation they sent you
+	invitations map[string]uuid.UUID
+	// TODO: figure out logic for keeping track of invitations sent out to users
+	// invited map[(string,string)]uuid.UUID
+
+	// filename to the invitation structure associated with it
+	sharedFiles map[string]Invitation
+
+	// private RSA key for user
+	privateKey userlib.PrivateKeyType
+
+	// private Sign function for user
+	privateSignKey userlib.DSSignKey
+
 	// You can add other attributes here if you want! But note that in order for attributes to
 	// be included when this struct is serialized to/from JSON, they must be capitalized.
 	// On the flipside, if you have an attribute that you want to be able to access from
@@ -110,11 +126,79 @@ type User struct {
 	// begins with a lowercase letter).
 }
 
+type Invitation struct {
+	// TODO ADD
+
+}
+
 // NOTE: The following methods have toy (insecure!) implementations.
 
 func InitUser(username string, password string) (userdataptr *User, err error) {
+	// check if empty username is provided
+	if username == "" {
+		panic(errors.New("An empty username was provided please provide username of length of at least 1"))
+	}
+	// check if a user with the username already exists
+	userCheck := username + "RSA"
+	_, ok := userlib.KeystoreGet(userCheck)
+	if ok == true {
+		panic(errors.New("The username already exists"))
+	}
+	//We initialize a new User struct here
 	var userdata User
 	userdata.Username = username
+
+	// generate public + private key, assign private key
+	var pubRSA userlib.PKEEncKey
+	var priRSA userlib.PKEDecKey
+	pubRSA, priRSA, _ = userlib.PKEKeyGen()
+	userdata.privateKey = priRSA
+	// storing the public key in KeyStore
+	userlib.KeystoreSet(username+"RSA", pubRSA)
+
+	// generate sign + verify signature key, assign sign key
+	var priSign userlib.DSSignKey
+	var pubSign userlib.DSVerifyKey
+	priSign, pubSign, _ = userlib.DSKeyGen()
+	userdata.privateSignKey = priSign
+	// storing the verify key in Keystore
+	userlib.KeystoreSet(username+"Sign", pubSign)
+
+	//TODO MAYBE CHANGE HOW WE DEAL WITH SALTS????????
+	salt := userlib.Hash([]byte(username))
+	//Maybe change to something else to store the salt (maybe instide user struct or datastore)
+	userByte := userlib.Argon2Key([]byte(username+password), salt, 16)
+	userUUID, err := uuid.FromBytes(userByte)
+	if err != nil {
+		panic(errors.New("An error occurred while generating a UUID: " + err.Error()))
+	}
+	//userdataByte is the User struct turned into a byte for storage
+	userdataByte, err := json.Marshal(userdata)
+	//Error message
+	if err != nil {
+		panic(errors.New("An error occurred while converting User struct to []bytes: " + err.Error()))
+	}
+	userlib.DatastoreSet(userUUID, userdataByte)
+
+	// use the HASHKDF alonside the term "HMAC" to generate our HMAC key
+	largeHash, err := userlib.HashKDF(userByte, []byte("HMAC"))
+	if err != nil {
+		return nil, err
+	}
+	//Calculate the HMAC of the User struct byte string
+	HMACValue, err := userlib.HMACEval(largeHash[0:16], userdataByte)
+	if err != nil {
+		return nil, err
+	}
+
+	// generate UUID with hashed username + HMAC
+	userHMAC := userlib.Hash([]byte(username + "HMAC"))
+	HMACUUID, err := uuid.FromBytes(userHMAC[:16])
+	// Store the HMAC'd user struct on dataStore
+	userlib.DatastoreSet(HMACUUID, HMACValue)
+
+	//TODO: Encrypt User Struct
+
 	return &userdata, nil
 }
 
