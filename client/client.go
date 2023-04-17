@@ -102,21 +102,28 @@ func someUsefulThings() {
 type User struct {
 	Username string
 
+	Password string
+
 	// filenames to uuid of file
-	ownedFiles map[string]uuid.UUID
+	OwnedFiles map[string]uuid.UUID
 	// names of people who invited you to the invitation they sent you
-	invitations map[string]uuid.UUID
+	Invitations map[string]uuid.UUID
 	// TODO: figure out logic for keeping track of invitations sent out to users
 	// invited map[(string,string)]uuid.UUID
 
 	// filename to the invitation structure associated with it
-	sharedFiles map[string]Invitation
+	SharedFiles map[string]Invitation
 
 	// private RSA key for user
-	privateKey userlib.PrivateKeyType
+	PrivateKey userlib.PrivateKeyType
 
 	// private Sign function for user
-	privateSignKey userlib.DSSignKey
+	PrivateSignKey userlib.DSSignKey
+
+	// Map mapping filenames to HMAC keys
+
+	// Map mapping file UUID to File source key
+	FileSourceKey map[uuid.UUID][]byte
 
 	// You can add other attributes here if you want! But note that in order for attributes to
 	// be included when this struct is serialized to/from JSON, they must be capitalized.
@@ -124,6 +131,13 @@ type User struct {
 	// this struct's methods, but you DON'T want that value to be included in the serialized value
 	// of this struct that's stored in datastore, then you can use a "private" variable (e.g. one that
 	// begins with a lowercase letter).
+}
+
+type File struct {
+	Content  []byte
+	NextFile uuid.UUID
+	// Only really comes into play for the header
+	LastFile uuid.UUID
 }
 
 type Invitation struct {
@@ -147,12 +161,13 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 	//We initialize a new User struct here
 	var userdata User
 	userdata.Username = username
+	userdata.Password = password
 
 	// generate public + private key, assign private key
 	var pubRSA userlib.PKEEncKey
 	var priRSA userlib.PKEDecKey
 	pubRSA, priRSA, _ = userlib.PKEKeyGen()
-	userdata.privateKey = priRSA
+	userdata.PrivateKey = priRSA
 	// storing the public key in KeyStore
 	userlib.KeystoreSet(username+"RSA", pubRSA)
 
@@ -160,7 +175,7 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 	var priSign userlib.DSSignKey
 	var pubSign userlib.DSVerifyKey
 	priSign, pubSign, _ = userlib.DSKeyGen()
-	userdata.privateSignKey = priSign
+	userdata.PrivateSignKey = priSign
 	// storing the verify key in Keystore
 	userlib.KeystoreSet(username+"Sign", pubSign)
 
@@ -274,22 +289,133 @@ func GetUser(username string, password string) (userdataptr *User, err error) {
 }
 
 func (userdata *User) StoreFile(filename string, content []byte) (err error) {
-	storageKey, err := uuid.FromBytes(userlib.Hash([]byte(filename + userdata.Username))[:16])
-	if err != nil {
-		return err
+	// storageKey, err := uuid.FromBytes(userlib.Hash([]byte(filename + userdata.Username))[:16])
+	// if err != nil {
+	// 	return err
+	// }
+	// contentBytes, err := json.Marshal(content)
+	// if err != nil {
+	// 	return err
+	// }
+	// userlib.DatastoreSet(storageKey, contentBytes)
+
+	contentTotalLength := len(content)
+	fileStructNumber := 0
+
+	// Slice length is the max size of bytes in each file struct
+	slicelength := 256
+
+	// For loop to create all the File blocks
+	for i := 0; i < contentTotalLength; i += slicelength {
+		fileStructNumber += 1
 	}
-	contentBytes, err := json.Marshal(content)
-	if err != nil {
-		return err
+	if fileStructNumber == 0 {
+		fileStructNumber += 1
 	}
-	userlib.DatastoreSet(storageKey, contentBytes)
-	// Create a file structure
+
+	// Initialize array to store all current file structures
+	var fileArray []File = make([]File, int(fileStructNumber))
+	// Intialize array to store all current uuids for each file
+	var uuidArray []uuid.UUID = make([]uuid.UUID, int(fileStructNumber))
+
+	// Iterate through the array length and make a file for each one
+	for i := 0; i < fileStructNumber; i += 1 {
+		var currContent []byte
+		if i == fileStructNumber-1 {
+			currContent = content[i*slicelength : contentTotalLength]
+		} else {
+			currContent = content[i*slicelength : (i*slicelength + slicelength)]
+		}
+
+		// Generates File struct and stores data in it
+		var newFileBlock File
+		newFileBlock.Content = currContent
+
+		// Generates random UUID for file
+		randomFileUUID := uuid.New()
+
+		// Places File struct and UUID in respective place
+		fileArray[i] = newFileBlock
+		uuidArray[i] = randomFileUUID
+
+		if i != 0 {
+			fileArray[i].NextFile = randomFileUUID
+		}
+
+		if i == fileStructNumber-1 {
+			fileArray[0].LastFile = randomFileUUID
+		}
+
+		sourceKey := userlib.Argon2Key([]byte(filename+userdata.Username), userlib.Hash([]byte(userdata.Username)), 16)
+
+		userdata.FileSourceKey[randomFileUUID] = sourceKey
+
+		// Generate ENC and MAC Keys
+		encKey, err := userlib.HashKDF(sourceKey, []byte("Encrypt"))
+		if err != nil {
+			return err
+		}
+		macKey, err := userlib.HashKDF(sourceKey, []byte("HMAC"))
+		if err != nil {
+			return err
+		}
+
+		//filedataByte is the File struct turned into a byte for storage
+		filedataByte, err := json.Marshal(fileArray[i])
+		//Error message
+		if err != nil {
+			return err
+		}
+		//TODO: Encrypt File Struct
+		IV := userlib.RandomBytes(16)
+		filedataByteEnc := userlib.SymEnc(encKey[0:16], IV, filedataByte)
+
+		userlib.DatastoreSet(randomFileUUID, filedataByteEnc)
+
+		//Calculate the HMAC of the File struct byte string
+		HMACValue, err := userlib.HMACEval(macKey[0:16], filedataByteEnc)
+		if err != nil {
+			return err
+		}
+		HMACUUID, err := uuid.FromBytes(macKey[16:32])
+		// Store the HMAC'd user struct on dataStore
+		userlib.DatastoreSet(HMACUUID, HMACValue)
+
+	}
+
 	// randomly generate the UUID for all file structures
 	// HMAC
 	// Store the data in the file structure (We will need to break the data into small chunks of some length)
 	// We need to encrpyt the file stucture
 	// We need to HMAC the file structure
 	// We then append the head of the file to the userstruct and then we have to re HMAC and encrpyt the user structure again
+	// If the file already existed and we are just overwriting it, we need to redo all the intermediate structures and also make shat there aren't any
+	// duplicates for usr structure
+
+	//TODO MAYBE CHANGE HOW WE DEAL WITH SALTS????????
+	salt := userlib.Hash([]byte(userdata.Username))
+	userSourceKey := userlib.Argon2Key([]byte(userdata.Username+userdata.Password), salt, 16)
+	// MAYBE WE NEED TO UNPOINTER THE POINTER TODO MAYBE
+	userByte, err := json.Marshal(userdata)
+	if err != nil {
+		return err
+	}
+
+	userHMAC, userEnc, uuidHMAC, err := EncryptHMACHelper(userSourceKey, userByte)
+	if err != nil {
+		return err
+	}
+
+	newUserUUID, err := uuid.FromBytes(userSourceKey)
+	if err != nil {
+		return err
+	}
+
+	userlib.DatastoreSet(newUserUUID, userEnc)
+
+	userlib.DatastoreSet(uuidHMAC, userHMAC)
+
+	// TODO deal with intermediates
 	return
 }
 
@@ -321,4 +447,30 @@ func (userdata *User) AcceptInvitation(senderUsername string, invitationPtr uuid
 
 func (userdata *User) RevokeAccess(filename string, recipientUsername string) error {
 	return nil
+}
+
+func EncryptHMACHelper(sourcekey []byte, content []byte) ([]byte, []byte, uuid.UUID, error) {
+
+	// Generate ENC and MAC Keys
+	encKey, err := userlib.HashKDF(sourcekey, []byte("Encrypt"))
+	if err != nil {
+		return nil, nil, uuid.New(), err
+	}
+	macKey, err := userlib.HashKDF(sourcekey, []byte("HMAC"))
+	if err != nil {
+		return nil, nil, uuid.New(), err
+	}
+
+	// Encrypt Struct
+	IV := userlib.RandomBytes(16)
+	contentEnc := userlib.SymEnc(encKey[0:16], IV, content)
+
+	// Calculate the HMAC of the struct byte string
+	HMAC, err := userlib.HMACEval(macKey[0:16], contentEnc)
+	if err != nil {
+		return nil, nil, uuid.New(), err
+	}
+	UUID, err := uuid.FromBytes(macKey[16:32])
+
+	return HMAC, contentEnc, UUID, nil
 }
