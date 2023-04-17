@@ -172,13 +172,23 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 	if err != nil {
 		panic(errors.New("An error occurred while generating a UUID: " + err.Error()))
 	}
+
 	//userdataByte is the User struct turned into a byte for storage
 	userdataByte, err := json.Marshal(userdata)
 	//Error message
 	if err != nil {
 		panic(errors.New("An error occurred while converting User struct to []bytes: " + err.Error()))
 	}
-	userlib.DatastoreSet(userUUID, userdataByte)
+
+	//TODO: Encrypt User Struct
+	IV := userlib.RandomBytes(16)
+	encryptKey, err := userlib.HashKDF(userByte, []byte("Encrypt"))
+	if err != nil {
+		return nil, err
+	}
+	userdataByteEnc := userlib.SymEnc(encryptKey[0:16], IV, userdataByte)
+
+	userlib.DatastoreSet(userUUID, userdataByteEnc)
 
 	// use the HASHKDF alonside the term "HMAC" to generate our HMAC key
 	largeHash, err := userlib.HashKDF(userByte, []byte("HMAC"))
@@ -186,25 +196,80 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 		return nil, err
 	}
 	//Calculate the HMAC of the User struct byte string
-	HMACValue, err := userlib.HMACEval(largeHash[0:16], userdataByte)
+	HMACValue, err := userlib.HMACEval(largeHash[0:16], userdataByteEnc)
 	if err != nil {
 		return nil, err
 	}
 
 	// generate UUID with hashed username + HMAC
-	userHMAC := userlib.Hash([]byte(username + "HMAC"))
-	HMACUUID, err := uuid.FromBytes(userHMAC[:16])
+
+	// COMMENTED OUT AREA
+	// userHMAC := userlib.Hash([]byte(largeHash[16:32]))
+	HMACUUID, err := uuid.FromBytes(largeHash[16:32])
 	// Store the HMAC'd user struct on dataStore
 	userlib.DatastoreSet(HMACUUID, HMACValue)
-
-	//TODO: Encrypt User Struct
 
 	return &userdata, nil
 }
 
 func GetUser(username string, password string) (userdataptr *User, err error) {
+
+	//TODO MAYBE CHANGE HOW WE DEAL WITH SALTS????????
+	salt := userlib.Hash([]byte(username))
+	//Maybe change to something else to store the salt (maybe instide user struct or datastore)
+	userByte := userlib.Argon2Key([]byte(username+password), salt, 16)
+	userUUID, err := uuid.FromBytes(userByte)
+	if err != nil {
+		panic(errors.New("An error occurred while generating a UUID: " + err.Error()))
+	}
+
+	userdataByteEnc, exists := userlib.DatastoreGet(userUUID)
+
+	if exists == false {
+		return nil, errors.New("The username and passowrd combination is incorrect")
+	}
+
+	// use the HASHKDF alonside the term "HMAC" to generate our HMAC key
+	largeHash, err := userlib.HashKDF(userByte, []byte("HMAC"))
+	if err != nil {
+		return nil, err
+	}
+	//Calculate the HMAC of the User struct byte string
+	HMACValue, err := userlib.HMACEval(largeHash[0:16], userdataByteEnc)
+	if err != nil {
+		return nil, err
+	}
+
+	// generate UUID with hashed username + HMAC
+
+	// COMMENTED OUT AREA
+	// userHMAC := userlib.Hash([]byte(largeHash[16:32]))
+	HMACUUID, err := uuid.FromBytes(largeHash[16:32])
+
+	dataStoreHMACValue, exists := userlib.DatastoreGet(HMACUUID)
+	if exists == false {
+		return nil, errors.New("HMAC does not exist in datastore")
+	}
+
+	HMACEqual := userlib.HMACEqual(HMACValue, dataStoreHMACValue)
+	if HMACEqual != true {
+		return nil, errors.New("The user struct or stored HMAC has been tampered with ABORT")
+	}
+
+	encryptKey, err := userlib.HashKDF(userByte, []byte("Encrypt"))
+	if err != nil {
+		return nil, err
+	}
+
+	userdataByteDecrypt := userlib.SymDec(encryptKey[0:16], userdataByteEnc)
+
 	var userdata User
 	userdataptr = &userdata
+	err = json.Unmarshal(userdataByteDecrypt, userdataptr)
+	if err != nil {
+		return nil, err
+	}
+
 	return userdataptr, nil
 }
 
@@ -218,6 +283,13 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 		return err
 	}
 	userlib.DatastoreSet(storageKey, contentBytes)
+	// Create a file structure
+	// randomly generate the UUID for all file structures
+	// HMAC
+	// Store the data in the file structure (We will need to break the data into small chunks of some length)
+	// We need to encrpyt the file stucture
+	// We need to HMAC the file structure
+	// We then append the head of the file to the userstruct and then we have to re HMAC and encrpyt the user structure again
 	return
 }
 
