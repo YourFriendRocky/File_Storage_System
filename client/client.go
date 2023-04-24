@@ -14,7 +14,6 @@ import (
 	// hex.EncodeToString(...) is useful for converting []byte to string
 
 	// Useful for string manipulation
-	"strings"
 
 	// Useful for formatting strings (e.g. `fmt.Sprintf`).
 	"fmt"
@@ -104,15 +103,11 @@ type User struct {
 
 	Password string
 
-	// filenames to uuid of file
+	// Dict mapping filenames to uuid of file intermediate struct
 	OwnedFiles map[string]uuid.UUID
-	// names of people who invited you to the invitation they sent you
-	Invitations map[string]uuid.UUID
-	// TODO: figure out logic for keeping track of invitations sent out to users
-	// invited map[(string,string)]uuid.UUID
 
-	// filename to the invitation structure associated with it
-	SharedFiles map[string]Invitation
+	// Dict mapping filesnames to files invitations we were invited to and accepted
+	InvitedFiles map[string]uuid.UUID
 
 	// private RSA key for user
 	PrivateKey userlib.PrivateKeyType
@@ -120,10 +115,11 @@ type User struct {
 	// private Sign function for user
 	PrivateSignKey userlib.DSSignKey
 
-	// Map mapping filenames to HMAC keys
+	// Map mapping file UUID to File Encrypt key
+	FileEncrypt map[uuid.UUID][]byte
 
-	// Map mapping file UUID to File source key
-	FileSourceKey map[uuid.UUID][]byte
+	// Map mapping file UUID to File HMAC key
+	FileHMAC map[uuid.UUID][]byte
 
 	// You can add other attributes here if you want! But note that in order for attributes to
 	// be included when this struct is serialized to/from JSON, they must be capitalized.
@@ -141,8 +137,50 @@ type File struct {
 }
 
 type Invitation struct {
-	// TODO ADD
 
+	// Signature given to the invitation
+	Signature []byte
+	// RSA encrpyted UUID of the intermediate struct
+	EncIntermediateUUID []byte
+	// RSA mac key
+	RSAMacKey []byte
+	// RSA Encryption key
+	RSAEncryptKey []byte
+}
+
+type InvitationIntermediate struct {
+
+	//File Encrypt key
+	FileEncryptKey []byte
+	//File MAC key
+	FileMACKey []byte
+	//File head uuid
+	FileHeadUUID uuid.UUID
+	//HMACUUID salt (salt value for generation of HMAC keys)
+	HMACUUIDSalt []byte
+}
+
+type FileIntermediate struct {
+	// UUID of file
+	FileUUID uuid.UUID
+
+	// Dict that maps usernames to invitations (UUID of Intermediate struct above)
+	UserInvitations map[string]uuid.UUID
+
+	// File Encrypt Key
+	FileEncrypt []byte
+
+	// File MAC Key
+	FileMac []byte
+
+	// HMACUUID salt (salt value for generation of HMAC keys)
+	HMACUUIDSalt []byte
+
+	// Dict that maps usernames to Intermediate Encrypt key
+	KeysIntermediateEncrypt map[string][]byte
+
+	// Dict that maps usernames to Intermediate HMAC key
+	KeysIntermediateHMAC map[string][]byte
 }
 
 // NOTE: The following methods have toy (insecure!) implementations.
@@ -178,6 +216,12 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 	userdata.PrivateSignKey = priSign
 	// storing the verify key in Keystore
 	userlib.KeystoreSet(username+"Sign", pubSign)
+
+	// Initialize maps and assign them to the user struct
+	userdata.FileEncrypt = make(map[uuid.UUID][]byte)
+	userdata.FileHMAC = make(map[uuid.UUID][]byte)
+	userdata.OwnedFiles = make(map[string]uuid.UUID)
+	userdata.InvitedFiles = make(map[string]uuid.UUID)
 
 	//TODO MAYBE CHANGE HOW WE DEAL WITH SALTS????????
 	salt := userlib.Hash([]byte(username))
@@ -289,15 +333,6 @@ func GetUser(username string, password string) (userdataptr *User, err error) {
 }
 
 func (userdata *User) StoreFile(filename string, content []byte) (err error) {
-	// storageKey, err := uuid.FromBytes(userlib.Hash([]byte(filename + userdata.Username))[:16])
-	// if err != nil {
-	// 	return err
-	// }
-	// contentBytes, err := json.Marshal(content)
-	// if err != nil {
-	// 	return err
-	// }
-	// userlib.DatastoreSet(storageKey, contentBytes)
 
 	contentTotalLength := len(content)
 	fileStructNumber := 0
@@ -313,12 +348,177 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 		fileStructNumber += 1
 	}
 
+	//
+	//
+	//
+	//
+	if userdata.OwnedFiles[filename] != uuid.Nil || userdata.InvitedFiles[filename] != uuid.Nil {
+		var fileEncryptKey []byte
+		var fileHMACKey []byte
+		var fileheadUUID uuid.UUID
+		var fileHMACSalt []byte
+
+		//User owns the file
+		if userdata.OwnedFiles[filename] != uuid.Nil {
+			fileIntermediateUUID := userdata.OwnedFiles[filename]
+			fileIntermediateEncKey := userdata.FileEncrypt[fileIntermediateUUID]
+			fileIntermediateHMACKey := userdata.FileHMAC[fileIntermediateUUID]
+
+			fileIntermediateEncrypted, ok := userlib.DatastoreGet(fileIntermediateUUID)
+			if ok == false {
+				return errors.New("datastore couldnt find fileIntermediate")
+			}
+
+			fileIntermediateHMACEval, err := userlib.HMACEval(fileIntermediateHMACKey, fileIntermediateEncrypted)
+			if err != nil {
+				return err
+			}
+
+			fileIntermediateHMACUUIDTemp := userlib.Argon2Key([]byte(userdata.Password+filename), userlib.Hash(fileIntermediateHMACKey), 16)
+			fileIntermediateHMACUUID, err := uuid.FromBytes(fileIntermediateHMACUUIDTemp)
+			if err != nil {
+				return err
+			}
+
+			actualFileIntermediateHMACEval, ok := userlib.DatastoreGet(fileIntermediateHMACUUID)
+			if ok == false {
+				return errors.New("datastore couldnt find HMAC")
+			}
+
+			HMACEqual := userlib.HMACEqual(fileIntermediateHMACEval, actualFileIntermediateHMACEval)
+			if !HMACEqual {
+				return errors.New("HMACVALUES NOT EQUAL TO STORED HMAC EVAL VALUE")
+			}
+
+			fileIntermediateDec := userlib.SymDec(fileIntermediateEncKey, fileIntermediateEncrypted)
+
+			var fileIntermediateStruct FileIntermediate
+			fileIntermptr := &fileIntermediateStruct
+			json.Unmarshal(fileIntermediateDec, fileIntermptr)
+
+			fileEncryptKey = fileIntermediateStruct.FileEncrypt
+			fileHMACKey = fileIntermediateStruct.FileMac
+			fileHMACSalt = fileIntermediateStruct.HMACUUIDSalt
+			fileheadUUID = fileIntermediateStruct.FileUUID
+
+			//User was invited to the file
+			//TODO: MAYBE CHANGE
+		} else {
+			fileIntermediateUUID := userdata.InvitedFiles[filename]
+			fileIntermediateEncKey := userdata.FileEncrypt[fileIntermediateUUID]
+			fileIntermediateHMACKey := userdata.FileHMAC[fileIntermediateUUID]
+
+			fileIntermediateEncrypted, ok := userlib.DatastoreGet(fileIntermediateUUID)
+			if ok == false {
+				return errors.New("datastore couldnt find invitationIntermediate")
+			}
+
+			fileIntermediateHMACEval, err := userlib.HMACEval(fileIntermediateHMACKey, fileIntermediateEncrypted)
+			if err != nil {
+				return err
+			}
+
+			fileIntermediateHMACUUID := userdata.InvitedFiles[filename+" HMACUUID"]
+
+			actualFileIntermediateHMACEval, ok := userlib.DatastoreGet(fileIntermediateHMACUUID)
+			if ok == false {
+				return errors.New("datastore couldnt find HMAC")
+			}
+
+			HMACEqual := userlib.HMACEqual(fileIntermediateHMACEval, actualFileIntermediateHMACEval)
+			if !HMACEqual {
+				return errors.New("HMACVALUES NOT EQUAL TO STORED HMAC EVAL VALUE")
+			}
+
+			fileIntermediateDec := userlib.SymDec(fileIntermediateEncKey, fileIntermediateEncrypted)
+
+			var invitationIntermediateStruct InvitationIntermediate
+			fileIntermptr := &invitationIntermediateStruct
+			json.Unmarshal(fileIntermediateDec, fileIntermptr)
+
+			fileEncryptKey = invitationIntermediateStruct.FileEncryptKey
+			fileHMACKey = invitationIntermediateStruct.FileMACKey
+			fileHMACSalt = invitationIntermediateStruct.HMACUUIDSalt
+			fileheadUUID = invitationIntermediateStruct.FileHeadUUID
+
+		}
+		// File head
+		var fileHead File
+		fileHeadptr := &fileHead
+
+		//Get the fileHeadEnc from datastore
+		fileHeadEnc, ok := userlib.DatastoreGet(fileheadUUID)
+		if ok == false {
+			return errors.New("datastore couldnt find headFile")
+		}
+
+		//Decrypt the head file structure first
+		//Put the resultant in fileHead
+		err = json.Unmarshal(userlib.SymDec(fileEncryptKey, fileHeadEnc), fileHeadptr)
+		if err != nil {
+			return err
+		}
+
+		//Generates files and stores them
+		err = FileGeneratorHelper(fileStructNumber, content, slicelength, fileEncryptKey, fileHMACKey, fileHMACSalt, fileheadUUID)
+		if err != nil {
+			return err
+		}
+
+		//
+		return
+	}
+
+	//
+	//
+	//
+	//
+	// Initialize a Intermediate file structure
+	var fileIntermediate FileIntermediate
+	fileIntermediate.UserInvitations = make(map[string]uuid.UUID)
+	fileIntermediate.KeysIntermediateEncrypt = make(map[string][]byte)
+	fileIntermediate.KeysIntermediateHMAC = make(map[string][]byte)
+
+	// uuid, mackey, encrypt key
+
+	// Generates Argon2Key
+	// TODO change generation of Argon2Key maybe
+	sourceKey := userlib.Argon2Key([]byte(filename+userdata.Password), userlib.Hash([]byte(userdata.Username)), 16)
+
+	// Generate ENC and MAC Keys
+	encKey, err := userlib.HashKDF(sourceKey, []byte("Encrypt"))
+	if err != nil {
+		return err
+	}
+	macKey, err := userlib.HashKDF(sourceKey, []byte("HMAC"))
+	if err != nil {
+		return err
+	}
+
+	// Store Enc and Hmac Keys
+	fileIntermediate.FileEncrypt = encKey[0:16]
+	fileIntermediate.FileMac = macKey[0:16]
+
+	// Create random byte array for salt and store that
+	fileIntermediate.HMACUUIDSalt = userlib.RandomBytes(32)
+
+	// TODO: store File Enc, Mac, File UUID in intermediate struct
+
 	// Initialize array to store all current file structures
 	var fileArray []File = make([]File, int(fileStructNumber))
 	// Intialize array to store all current uuids for each file
 	var uuidArray []uuid.UUID = make([]uuid.UUID, int(fileStructNumber))
 
-	// Iterate through the array length and make a file for each one
+	// The file already exists
+
+	// First generates UUIDS
+	for i := 0; i < fileStructNumber; i += 1 {
+		// Generates random UUID for file
+		randomFileUUID := uuid.New()
+		uuidArray[i] = randomFileUUID
+	}
+
+	// Next Generate File Blocks
 	for i := 0; i < fileStructNumber; i += 1 {
 		var currContent []byte
 		if i == fileStructNumber-1 {
@@ -326,39 +526,24 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 		} else {
 			currContent = content[i*slicelength : (i*slicelength + slicelength)]
 		}
-
 		// Generates File struct and stores data in it
 		var newFileBlock File
 		newFileBlock.Content = currContent
 
-		// Generates random UUID for file
-		randomFileUUID := uuid.New()
-
 		// Places File struct and UUID in respective place
 		fileArray[i] = newFileBlock
-		uuidArray[i] = randomFileUUID
 
-		if i != 0 {
-			fileArray[i].NextFile = randomFileUUID
+		if i != fileStructNumber-1 {
+			fileArray[i].NextFile = uuidArray[i+1]
 		}
 
 		if i == fileStructNumber-1 {
-			fileArray[0].LastFile = randomFileUUID
+			fileArray[0].LastFile = uuidArray[i]
 		}
+	}
 
-		sourceKey := userlib.Argon2Key([]byte(filename+userdata.Username), userlib.Hash([]byte(userdata.Username)), 16)
-
-		userdata.FileSourceKey[randomFileUUID] = sourceKey
-
-		// Generate ENC and MAC Keys
-		encKey, err := userlib.HashKDF(sourceKey, []byte("Encrypt"))
-		if err != nil {
-			return err
-		}
-		macKey, err := userlib.HashKDF(sourceKey, []byte("HMAC"))
-		if err != nil {
-			return err
-		}
+	// Iterate through FileBlocks, and Encrypt and HMAC them
+	for i := 0; i < fileStructNumber; i += 1 {
 
 		//filedataByte is the File struct turned into a byte for storage
 		filedataByte, err := json.Marshal(fileArray[i])
@@ -366,30 +551,75 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 		if err != nil {
 			return err
 		}
-		//TODO: Encrypt File Struct
 		IV := userlib.RandomBytes(16)
-		filedataByteEnc := userlib.SymEnc(encKey[0:16], IV, filedataByte)
+		filedataByteEnc := userlib.SymEnc(fileIntermediate.FileEncrypt, IV, filedataByte)
 
-		userlib.DatastoreSet(randomFileUUID, filedataByteEnc)
+		userlib.DatastoreSet(uuidArray[i], filedataByteEnc)
 
 		//Calculate the HMAC of the File struct byte string
-		HMACValue, err := userlib.HMACEval(macKey[0:16], filedataByteEnc)
+		HMACValue, err := userlib.HMACEval(fileIntermediate.FileMac, filedataByteEnc)
 		if err != nil {
 			return err
 		}
-		HMACUUID, err := uuid.FromBytes(macKey[16:32])
+
+		// Generate a HMAC UUID
+		UUIDValue, err := json.Marshal(uuidArray[i])
+		if err != nil {
+			return err
+		}
+
+		generatedHMACUUID := userlib.Argon2Key(UUIDValue, userlib.Hash(fileIntermediate.HMACUUIDSalt), 16)
+
+		HMACUUID, err := uuid.FromBytes(generatedHMACUUID)
+		if err != nil {
+			return err
+		}
+
 		// Store the HMAC'd user struct on dataStore
 		userlib.DatastoreSet(HMACUUID, HMACValue)
 
 	}
+
+	// Store the head file uuid
+	fileIntermediate.FileUUID = uuidArray[0]
+
+	// Generate UUID for fileIntermedaite
+	fileIntermediateUUID := uuid.New()
+	// Generate Enc and HMAC key for fileIntermediate
+	fileIntermediateEncKey := userlib.RandomBytes(16)
+
+	fileIntermediateHMACKey := userlib.RandomBytes(16)
+
+	fileIntermediateHMACUUIDTemp := userlib.Argon2Key([]byte(userdata.Password+filename), userlib.Hash(fileIntermediateHMACKey), 16)
+	fileIntermediateHMACUUID, err := uuid.FromBytes(fileIntermediateHMACUUIDTemp)
+	if err != nil {
+		return err
+	}
+	marshalStructContent, err := json.Marshal(fileIntermediate)
+	err = EncryptHMACHelper(fileIntermediateEncKey, fileIntermediateHMACKey, marshalStructContent,
+		fileIntermediateUUID, fileIntermediateHMACUUID)
+	if err != nil {
+		return err
+	}
+
+	// Store fileIntermediateUUID in userdata user struct
+	userdata.OwnedFiles[filename] = fileIntermediateUUID
+	// Store fileHMAC
+	userdata.FileEncrypt[fileIntermediateUUID] = fileIntermediateEncKey
+	userdata.FileHMAC[fileIntermediateUUID] = fileIntermediateHMACKey
+	// Store fileEncKey
 
 	// randomly generate the UUID for all file structures
 	// HMAC
 	// Store the data in the file structure (We will need to break the data into small chunks of some length)
 	// We need to encrpyt the file stucture
 	// We need to HMAC the file structure
-	// We then append the head of the file to the userstruct and then we have to re HMAC and encrpyt the user structure again
-	// If the file already existed and we are just overwriting it, we need to redo all the intermediate structures and also make shat there aren't any
+
+	// We then create a HMAC and encrypt key for the file intermediate structure
+	// WE need to encrypt and HMAC the file intermediate structure
+	// We need to store that in the Userfile
+	// We need to encrypt and reHMAC the Userfile
+	// If the file already existed and we are just overwriting it
 	// duplicates for usr structure
 
 	//TODO MAYBE CHANGE HOW WE DEAL WITH SALTS????????
@@ -401,7 +631,7 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 		return err
 	}
 
-	userHMAC, userEnc, uuidHMAC, err := EncryptHMACHelper(userSourceKey, userByte)
+	userHMAC, userEnc, uuidHMAC, err := EncryptHMACHelperSource(userSourceKey, userByte)
 	if err != nil {
 		return err
 	}
@@ -420,20 +650,379 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 }
 
 func (userdata *User) AppendToFile(filename string, content []byte) error {
+
+	// Total length of bytes
+	contentTotalLength := len(content)
+	fileStructNumber := 0
+
+	// Slice length is the max size of bytes in each file struct
+	slicelength := 256
+
+	// For loop to create all the File blocks
+	for i := 0; i < contentTotalLength; i += slicelength {
+		fileStructNumber += 1
+	}
+	if fileStructNumber == 0 {
+		fileStructNumber += 1
+	}
+
+	// Get HEAD file
+	fileEncryptKey, fileHMACKey, fileHeadUUID, fileHMACSalt, fileHead, err := userdata.GetHeadFile(filename)
+	print(len(fileHMACKey), "This is HMAC")
+	if err != nil {
+		return err
+	}
+	// Get last file
+	fileLastContentsEnc, ok := userlib.DatastoreGet(fileHead.LastFile)
+	if !ok {
+		return errors.New("Cant get the lastfile")
+	}
+
+	fileLastContents := userlib.SymDec(fileEncryptKey, fileLastContentsEnc)
+
+	var finalFile File
+	err = json.Unmarshal(fileLastContents, &finalFile)
+	if err != nil {
+		return err
+	}
+
+	var fileArray []File = make([]File, int(fileStructNumber))
+	var uuidArray []uuid.UUID = make([]uuid.UUID, int(fileStructNumber))
+
+	// Generate UUIDS
+	for i := 0; i < fileStructNumber; i += 1 {
+		// Generates random UUID for file
+		randomFileUUID := uuid.New()
+		uuidArray[i] = randomFileUUID
+	}
+
+	// Generate File Blocks
+	for i := 0; i < fileStructNumber; i += 1 {
+		var currContent []byte
+		if i == fileStructNumber-1 {
+			currContent = content[i*slicelength : contentTotalLength]
+		} else {
+			currContent = content[i*slicelength : (i*slicelength + slicelength)]
+		}
+		// Generates File struct and stores data in it
+		var newFileBlock File
+		newFileBlock.Content = currContent
+
+		// Places File struct and UUID in respective place
+		fileArray[i] = newFileBlock
+
+		if i != fileStructNumber-1 {
+			fileArray[i].NextFile = uuidArray[i+1]
+		}
+
+		if i == fileStructNumber-1 {
+			fileArray[0].LastFile = uuidArray[i]
+		}
+	}
+
+	// Generate a file head HMAC UUID
+	UUIDValue, err := json.Marshal(fileHeadUUID)
+	if err != nil {
+		return err
+	}
+	generatedHMACUUID := userlib.Argon2Key(UUIDValue, userlib.Hash(fileHMACSalt), 16)
+
+	fileHeadHMACUUID, err := uuid.FromBytes(generatedHMACUUID)
+	if err != nil {
+		return err
+	}
+
+	//Generate a file last HMAC UUID
+	UUIDValue, err = json.Marshal(fileHead.LastFile)
+	if err != nil {
+		return err
+	}
+	generatedHMACUUID = userlib.Argon2Key(UUIDValue, userlib.Hash(fileHMACSalt), 16)
+
+	fileLastHMACUUID, err := uuid.FromBytes(generatedHMACUUID)
+	if err != nil {
+		return err
+	}
+	var oneFile bool
+	oneFile = false
+
+	if fileHead.NextFile == uuid.Nil {
+		fileHead.NextFile = uuidArray[0]
+		fileHead.LastFile = uuidArray[fileStructNumber-1]
+		oneFile = true
+
+	} else {
+		//Change the Next and last uuid for headFile and lastFile
+		fileHead.LastFile = uuidArray[fileStructNumber-1]
+		finalFile.NextFile = uuidArray[0]
+	}
+
+	//Marshal the headFIle and lastFile
+	headFileMarshal, err := json.Marshal(fileHead)
+	lastFileMarshal, err := json.Marshal(finalFile)
+
+	if !oneFile {
+		err = EncryptHMACHelper(fileEncryptKey, fileEncryptKey, lastFileMarshal, fileHead.LastFile, fileLastHMACUUID)
+		if err != nil {
+			return err
+		}
+
+	}
+
+	err = EncryptHMACHelper(fileEncryptKey, fileHMACKey, headFileMarshal, fileHeadUUID, fileHeadHMACUUID)
+	if err != nil {
+		return err
+	}
+
+	// Iterate through FileBlocks, and Encrypt and HMAC them
+	for i := 0; i < fileStructNumber; i += 1 {
+
+		//filedataByte is the File struct turned into a byte for storage
+		filedataByte, err := json.Marshal(fileArray[i])
+		//Error message
+		if err != nil {
+			return err
+		}
+		IV := userlib.RandomBytes(16)
+		filedataByteEnc := userlib.SymEnc(fileEncryptKey, IV, filedataByte)
+
+		userlib.DatastoreSet(uuidArray[i], filedataByteEnc)
+
+		//Calculate the HMAC of the File struct byte string
+		HMACValue, err := userlib.HMACEval(fileHMACKey, filedataByteEnc)
+		if err != nil {
+			return err
+		}
+
+		// Generate a HMAC UUID
+		UUIDValue, err := json.Marshal(uuidArray[i])
+		if err != nil {
+			return err
+		}
+
+		generatedHMACUUID := userlib.Argon2Key(UUIDValue, userlib.Hash(fileHMACSalt), 16)
+
+		HMACUUID, err := uuid.FromBytes(generatedHMACUUID)
+		if err != nil {
+			return err
+		}
+
+		// Store the HMAC'd user struct on dataStore
+		userlib.DatastoreSet(HMACUUID, HMACValue)
+	}
+
 	return nil
 }
 
 func (userdata *User) LoadFile(filename string) (content []byte, err error) {
-	storageKey, err := uuid.FromBytes(userlib.Hash([]byte(filename + userdata.Username))[:16])
+	/* 	storageKey, err := uuid.FromBytes(userlib.Hash([]byte(filename + userdata.Username))[:16])
+	   	if err != nil {
+	   		return nil, err
+	   	}
+	   	dataJSON, ok := userlib.DatastoreGet(storageKey)
+	   	if !ok {
+	   		return nil, errors.New(strings.ToTitle("file not found"))
+	   	}
+	   	err = json.Unmarshal(dataJSON, &content) */
+
+	// 2 cases, owner of file and invited to file
+	// retrieve file
+	//owner case
+	//	Get intermediate uuid,
+
+	if userdata.OwnedFiles[filename] == uuid.Nil && userdata.InvitedFiles[filename] == uuid.Nil {
+		return nil, errors.New("given filename dne in personal namespace of the caller")
+	}
+
+	var fileEncryptKey []byte
+	var fileHMACKey []byte
+	var fileheadUUID uuid.UUID
+	var fileHMACSalt []byte
+
+	if userdata.OwnedFiles[filename] != uuid.Nil {
+		fileIntermediateUUID := userdata.OwnedFiles[filename]
+		fileIntermediateEncKey := userdata.FileEncrypt[fileIntermediateUUID]
+		fileIntermediateHMACKey := userdata.FileHMAC[fileIntermediateUUID]
+
+		fileIntermediateEncrypted, ok := userlib.DatastoreGet(fileIntermediateUUID)
+		if ok == false {
+			return nil, errors.New("datastore couldnt find fileIntermediate")
+		}
+
+		fileIntermediateHMACEval, err := userlib.HMACEval(fileIntermediateHMACKey, fileIntermediateEncrypted)
+		if err != nil {
+			return nil, err
+		}
+
+		fileIntermediateHMACUUIDTemp := userlib.Argon2Key([]byte(userdata.Password+filename), userlib.Hash(fileIntermediateHMACKey), 16)
+		fileIntermediateHMACUUID, err := uuid.FromBytes(fileIntermediateHMACUUIDTemp)
+		if err != nil {
+			return nil, err
+		}
+
+		actualFileIntermediateHMACEval, ok := userlib.DatastoreGet(fileIntermediateHMACUUID)
+		if ok == false {
+			return nil, errors.New("datastore couldnt find HMAC")
+		}
+
+		HMACEqual := userlib.HMACEqual(fileIntermediateHMACEval, actualFileIntermediateHMACEval)
+		if !HMACEqual {
+			return nil, errors.New("HMACVALUES NOT EQUAL TO STORED HMAC EVAL VALUE")
+		}
+
+		fileIntermediateDec := userlib.SymDec(fileIntermediateEncKey, fileIntermediateEncrypted)
+
+		var fileIntermediateStruct FileIntermediate
+		fileIntermptr := &fileIntermediateStruct
+		json.Unmarshal(fileIntermediateDec, fileIntermptr)
+
+		fileEncryptKey = fileIntermediateStruct.FileEncrypt
+		fileHMACKey = fileIntermediateStruct.FileMac
+		fileHMACSalt = fileIntermediateStruct.HMACUUIDSalt
+		fileheadUUID = fileIntermediateStruct.FileUUID
+
+	} else {
+		fileIntermediateUUID := userdata.InvitedFiles[filename]
+		fileIntermediateEncKey := userdata.FileEncrypt[fileIntermediateUUID]
+		fileIntermediateHMACKey := userdata.FileHMAC[fileIntermediateUUID]
+
+		fileIntermediateEncrypted, ok := userlib.DatastoreGet(fileIntermediateUUID)
+		if ok == false {
+			return nil, errors.New("datastore couldnt find invitationIntermediate")
+		}
+
+		fileIntermediateHMACEval, err := userlib.HMACEval(fileIntermediateHMACKey, fileIntermediateEncrypted)
+		if err != nil {
+			return nil, err
+		}
+
+		fileIntermediateHMACUUID := userdata.InvitedFiles[filename+" HMACUUID"]
+
+		actualFileIntermediateHMACEval, ok := userlib.DatastoreGet(fileIntermediateHMACUUID)
+		if ok == false {
+			return nil, errors.New("datastore couldnt find HMAC")
+		}
+
+		HMACEqual := userlib.HMACEqual(fileIntermediateHMACEval, actualFileIntermediateHMACEval)
+		if !HMACEqual {
+			return nil, errors.New("HMACVALUES NOT EQUAL TO STORED HMAC EVAL VALUE")
+		}
+
+		fileIntermediateDec := userlib.SymDec(fileIntermediateEncKey, fileIntermediateEncrypted)
+
+		var invitationIntermediateStruct InvitationIntermediate
+		fileIntermptr := &invitationIntermediateStruct
+		json.Unmarshal(fileIntermediateDec, fileIntermptr)
+
+		fileEncryptKey = invitationIntermediateStruct.FileEncryptKey
+		fileHMACKey = invitationIntermediateStruct.FileMACKey
+		fileHMACSalt = invitationIntermediateStruct.HMACUUIDSalt
+		fileheadUUID = invitationIntermediateStruct.FileHeadUUID
+
+	}
+
+	// File head
+	var fileHead File
+	fileHeadptr := &fileHead
+
+	//Get the fileHeadEnc from datastore
+	fileHeadEnc, ok := userlib.DatastoreGet(fileheadUUID)
+	if ok == false {
+		return nil, errors.New("datastore couldnt find headFile")
+	}
+
+	//HMAC it
+	fileHeadHMAC, err := userlib.HMACEval(fileHMACKey, fileHeadEnc)
 	if err != nil {
 		return nil, err
 	}
-	dataJSON, ok := userlib.DatastoreGet(storageKey)
-	if !ok {
-		return nil, errors.New(strings.ToTitle("file not found"))
+
+	// Generate a HMAC UUID
+	UUIDValue, err := json.Marshal(fileheadUUID)
+	if err != nil {
+		return nil, err
 	}
-	err = json.Unmarshal(dataJSON, &content)
-	return content, err
+
+	//HMACUUIDc finder
+	generatedHMACUUID := userlib.Argon2Key(UUIDValue, userlib.Hash(fileHMACSalt), 16)
+
+	HMACUUID, err := uuid.FromBytes(generatedHMACUUID)
+	if err != nil {
+		return nil, err
+	}
+
+	HMACActualEval, ok := userlib.DatastoreGet(HMACUUID)
+
+	if ok == false {
+		return nil, errors.New("datastore couldnt find headFile")
+	}
+
+	equal := userlib.HMACEqual(fileHeadHMAC, HMACActualEval)
+	if !equal {
+		return nil, errors.New("fileHead HMACVALUE NOT EQUAL TO STORED HMAC EVAL VALUE")
+	}
+
+	//Decrypt the head file structure first
+	//Put the resultant in fileHead
+	err = json.Unmarshal(userlib.SymDec(fileEncryptKey, fileHeadEnc), fileHeadptr)
+	if err != nil {
+		return nil, err
+	}
+
+	totalContent := fileHead.Content
+	nextPointer := fileHead.NextFile
+
+	/* var fileEncryptKey []byte
+	var fileHMACKey []byte
+	var fileheadUUID uuid.UUID
+	var fileHMACSalt []byte */
+
+	for nextPointer != uuid.Nil {
+		fileBlockEnc, ok := userlib.DatastoreGet(nextPointer)
+		if ok == false {
+			return nil, errors.New("datastore couldnt find fileBlock")
+		}
+
+		// Generate a HMAC UUID
+		UUIDValue, err := json.Marshal(nextPointer)
+		if err != nil {
+			return nil, err
+		}
+
+		//HMACUUIDc finder
+		generatedHMACUUID := userlib.Argon2Key(UUIDValue, userlib.Hash(fileHMACSalt), 16)
+		HMACUUID, err := uuid.FromBytes(generatedHMACUUID)
+		if err != nil {
+			return nil, err
+		}
+
+		HMACEvaluated, err := userlib.HMACEval(fileHMACKey, fileBlockEnc)
+		if err != nil {
+			return nil, err
+		}
+
+		HMACReal, ok := userlib.DatastoreGet(HMACUUID)
+		if ok == false {
+			return nil, errors.New("datastore couldnt find fileBlock")
+		}
+
+		equal = userlib.HMACEqual(HMACEvaluated, HMACReal)
+
+		if !equal {
+			return nil, errors.New("HMAC not equal")
+		}
+
+		var fileStruct File
+		err = json.Unmarshal(userlib.SymDec(fileEncryptKey, fileBlockEnc), &fileStruct)
+		if err != nil {
+			return nil, err
+		}
+
+		nextPointer = fileStruct.NextFile
+		totalContent = append(totalContent, fileStruct.Content...)
+	}
+
+	return totalContent, err
 }
 
 func (userdata *User) CreateInvitation(filename string, recipientUsername string) (
@@ -449,7 +1038,7 @@ func (userdata *User) RevokeAccess(filename string, recipientUsername string) er
 	return nil
 }
 
-func EncryptHMACHelper(sourcekey []byte, content []byte) ([]byte, []byte, uuid.UUID, error) {
+func EncryptHMACHelperSource(sourcekey []byte, content []byte) ([]byte, []byte, uuid.UUID, error) {
 
 	// Generate ENC and MAC Keys
 	encKey, err := userlib.HashKDF(sourcekey, []byte("Encrypt"))
@@ -473,4 +1062,246 @@ func EncryptHMACHelper(sourcekey []byte, content []byte) ([]byte, []byte, uuid.U
 	UUID, err := uuid.FromBytes(macKey[16:32])
 
 	return HMAC, contentEnc, UUID, nil
+}
+
+func EncryptHMACHelper(encKey []byte, HMACKey []byte, content []byte, contentUUID uuid.UUID, hmacUUID uuid.UUID) error {
+
+	// Encrypt Struct
+	IV := userlib.RandomBytes(16)
+	contentEnc := userlib.SymEnc(encKey, IV, content)
+
+	// Calculate the HMAC of the struct byte string
+	HMAC, err := userlib.HMACEval(HMACKey, contentEnc)
+	if err != nil {
+		return err
+	}
+
+	userlib.DatastoreSet(contentUUID, contentEnc)
+	userlib.DatastoreSet(hmacUUID, HMAC)
+
+	return nil
+}
+
+func FileGeneratorHelper(fileStructNumber int, content []byte, slicelength int, fileEncryptKey []byte, fileHMACKey []byte, fileHMACSalt []byte, fileHeadUUID uuid.UUID) error {
+	// we only need one file block as head
+	// Initialize array to store all current file structures
+	var fileArray []File = make([]File, int(fileStructNumber))
+	// Intialize array to store all current uuids for each file
+	var uuidArray []uuid.UUID = make([]uuid.UUID, int(fileStructNumber))
+
+	// First generates UUIDS
+	for i := 0; i < fileStructNumber; i += 1 {
+		// Generates random UUID for file
+		randomFileUUID := uuid.New()
+		uuidArray[i] = randomFileUUID
+	}
+
+	if fileHeadUUID != uuid.Nil {
+		uuidArray[0] = fileHeadUUID
+	}
+
+	// Next Generate File Blocks
+	for i := 0; i < fileStructNumber; i += 1 {
+		var currContent []byte
+		if i == fileStructNumber-1 {
+			currContent = content[i*slicelength:]
+		} else {
+			currContent = content[i*slicelength : (i*slicelength + slicelength)]
+		}
+		// Generates File struct and stores data in it
+		var newFileBlock File
+		newFileBlock.Content = currContent
+
+		// Places File struct and UUID in respective place
+		fileArray[i] = newFileBlock
+
+		if i != fileStructNumber-1 {
+			fileArray[i].NextFile = uuidArray[i+1]
+		}
+
+		if i == fileStructNumber-1 {
+			fileArray[0].LastFile = uuidArray[i]
+		}
+	}
+
+	// Iterate through FileBlocks, and Encrypt and HMAC them
+	for i := 0; i < fileStructNumber; i += 1 {
+
+		//filedataByte is the File struct turned into a byte for storage
+		filedataByte, err := json.Marshal(fileArray[i])
+		//Error message
+		if err != nil {
+			return err
+		}
+		//TODO: Encrypt File Struct
+		IV := userlib.RandomBytes(16)
+		filedataByteEnc := userlib.SymEnc(fileEncryptKey, IV, filedataByte)
+
+		userlib.DatastoreSet(uuidArray[i], filedataByteEnc)
+
+		//Calculate the HMAC of the File struct byte string
+		HMACValue, err := userlib.HMACEval(fileHMACKey, filedataByteEnc)
+		if err != nil {
+			return err
+		}
+
+		// Generate a HMAC UUID
+		UUIDValue, err := json.Marshal(uuidArray[i])
+		if err != nil {
+			return err
+		}
+
+		generatedHMACUUID := userlib.Argon2Key(UUIDValue, userlib.Hash(fileHMACSalt), 16)
+
+		HMACUUID, err := uuid.FromBytes(generatedHMACUUID)
+
+		// Store the HMAC'd user struct on dataStore
+		userlib.DatastoreSet(HMACUUID, HMACValue)
+
+	}
+	return nil
+
+}
+
+func (userdata *User) GetHeadFile(filename string) ([]byte, []byte, uuid.UUID, []byte, File, error) {
+
+	if userdata.OwnedFiles[filename] == uuid.Nil && userdata.InvitedFiles[filename] == uuid.Nil {
+		return nil, nil, uuid.Nil, nil, File{}, errors.New("given filename dne in personal namespace of the caller")
+	}
+
+	var fileEncryptKey []byte
+	var fileHMACKey []byte
+	var fileheadUUID uuid.UUID
+	var fileHMACSalt []byte
+
+	if userdata.OwnedFiles[filename] != uuid.Nil {
+		fileIntermediateUUID := userdata.OwnedFiles[filename]
+		fileIntermediateEncKey := userdata.FileEncrypt[fileIntermediateUUID]
+		fileIntermediateHMACKey := userdata.FileHMAC[fileIntermediateUUID]
+
+		fileIntermediateEncrypted, ok := userlib.DatastoreGet(fileIntermediateUUID)
+		if ok == false {
+			return nil, nil, uuid.Nil, nil, File{}, errors.New("datastore couldnt find fileIntermediate")
+		}
+
+		fileIntermediateHMACEval, err := userlib.HMACEval(fileIntermediateHMACKey, fileIntermediateEncrypted)
+		if err != nil {
+			return nil, nil, uuid.Nil, nil, File{}, err
+		}
+
+		fileIntermediateHMACUUIDTemp := userlib.Argon2Key([]byte(userdata.Password+filename), userlib.Hash(fileIntermediateHMACKey), 16)
+		fileIntermediateHMACUUID, err := uuid.FromBytes(fileIntermediateHMACUUIDTemp)
+		if err != nil {
+			return nil, nil, uuid.Nil, nil, File{}, err
+		}
+
+		actualFileIntermediateHMACEval, ok := userlib.DatastoreGet(fileIntermediateHMACUUID)
+		if ok == false {
+			return nil, nil, uuid.Nil, nil, File{}, errors.New("datastore couldnt find HMAC")
+		}
+
+		HMACEqual := userlib.HMACEqual(fileIntermediateHMACEval, actualFileIntermediateHMACEval)
+		if !HMACEqual {
+			return nil, nil, uuid.Nil, nil, File{}, errors.New("HMACVALUES NOT EQUAL TO STORED HMAC EVAL VALUE")
+		}
+
+		fileIntermediateDec := userlib.SymDec(fileIntermediateEncKey, fileIntermediateEncrypted)
+
+		var fileIntermediateStruct FileIntermediate
+		fileIntermptr := &fileIntermediateStruct
+		json.Unmarshal(fileIntermediateDec, fileIntermptr)
+
+		fileEncryptKey = fileIntermediateStruct.FileEncrypt
+		fileHMACKey = fileIntermediateStruct.FileMac
+		fileHMACSalt = fileIntermediateStruct.HMACUUIDSalt
+		fileheadUUID = fileIntermediateStruct.FileUUID
+
+	} else {
+		fileIntermediateUUID := userdata.InvitedFiles[filename]
+		fileIntermediateEncKey := userdata.FileEncrypt[fileIntermediateUUID]
+		fileIntermediateHMACKey := userdata.FileHMAC[fileIntermediateUUID]
+
+		fileIntermediateEncrypted, ok := userlib.DatastoreGet(fileIntermediateUUID)
+		if ok == false {
+			return nil, nil, uuid.Nil, nil, File{}, errors.New("datastore couldnt find invitationIntermediate")
+		}
+
+		fileIntermediateHMACEval, err := userlib.HMACEval(fileIntermediateHMACKey, fileIntermediateEncrypted)
+		if err != nil {
+			return nil, nil, uuid.Nil, nil, File{}, err
+		}
+
+		fileIntermediateHMACUUID := userdata.InvitedFiles[filename+" HMACUUID"]
+
+		actualFileIntermediateHMACEval, ok := userlib.DatastoreGet(fileIntermediateHMACUUID)
+		if ok == false {
+			return nil, nil, uuid.Nil, nil, File{}, errors.New("datastore couldnt find HMAC")
+		}
+
+		HMACEqual := userlib.HMACEqual(fileIntermediateHMACEval, actualFileIntermediateHMACEval)
+		if !HMACEqual {
+			return nil, nil, uuid.Nil, nil, File{}, errors.New("HMACVALUES NOT EQUAL TO STORED HMAC EVAL VALUE")
+		}
+
+		fileIntermediateDec := userlib.SymDec(fileIntermediateEncKey, fileIntermediateEncrypted)
+
+		var invitationIntermediateStruct InvitationIntermediate
+		fileIntermptr := &invitationIntermediateStruct
+		json.Unmarshal(fileIntermediateDec, fileIntermptr)
+
+		fileEncryptKey = invitationIntermediateStruct.FileEncryptKey
+		fileHMACKey = invitationIntermediateStruct.FileMACKey
+		fileHMACSalt = invitationIntermediateStruct.HMACUUIDSalt
+		fileheadUUID = invitationIntermediateStruct.FileHeadUUID
+
+	}
+
+	// File head
+	var fileHead File
+	fileHeadptr := &fileHead
+
+	//Get the fileHeadEnc from datastore
+	fileHeadEnc, ok := userlib.DatastoreGet(fileheadUUID)
+	if ok == false {
+		return nil, nil, uuid.Nil, nil, File{}, errors.New("datastore couldnt find headFile")
+	}
+
+	//HMAC it
+	fileHeadHMAC, err := userlib.HMACEval(fileHMACKey, fileHeadEnc)
+	if err != nil {
+		return nil, nil, uuid.Nil, nil, File{}, err
+	}
+
+	// Generate a HMAC UUID
+	UUIDValue, err := json.Marshal(fileheadUUID)
+	if err != nil {
+		return nil, nil, uuid.Nil, nil, File{}, err
+	}
+
+	//HMACUUIDc finder
+	generatedHMACUUID := userlib.Argon2Key(UUIDValue, userlib.Hash(fileHMACSalt), 16)
+
+	HMACUUID, err := uuid.FromBytes(generatedHMACUUID)
+	if err != nil {
+		return nil, nil, uuid.Nil, nil, File{}, err
+	}
+
+	HMACActualEval, ok := userlib.DatastoreGet(HMACUUID)
+
+	if ok == false {
+		return nil, nil, uuid.Nil, nil, File{}, errors.New("datastore couldnt find headFile")
+	}
+
+	equal := userlib.HMACEqual(fileHeadHMAC, HMACActualEval)
+	if !equal {
+		return nil, nil, uuid.Nil, nil, File{}, errors.New("fileHead HMACVALUE NOT EQUAL TO STORED HMAC EVAL VALUE")
+	}
+
+	//Decrypt the head file structure first
+	//Put the resultant in fileHead
+	err = json.Unmarshal(userlib.SymDec(fileEncryptKey, fileHeadEnc), fileHeadptr)
+	if err != nil {
+		return nil, nil, uuid.Nil, nil, File{}, err
+	}
+	return fileEncryptKey, fileHMACKey, fileheadUUID, fileHMACSalt, fileHead, err
 }
