@@ -715,9 +715,6 @@ func (userdata *User) AppendToFile(filename string, content []byte) error {
 			fileArray[i].NextFile = uuidArray[i+1]
 		}
 
-		if i == fileStructNumber-1 {
-			fileArray[0].LastFile = uuidArray[i]
-		}
 	}
 
 	// Generate a file head HMAC UUID
@@ -746,6 +743,7 @@ func (userdata *User) AppendToFile(filename string, content []byte) error {
 	var oneFile bool
 	oneFile = false
 
+	// Checks if we only have one block
 	if fileHead.NextFile == uuid.Nil {
 		fileHead.NextFile = uuidArray[0]
 		fileHead.LastFile = uuidArray[fileStructNumber-1]
@@ -759,10 +757,16 @@ func (userdata *User) AppendToFile(filename string, content []byte) error {
 
 	//Marshal the headFIle and lastFile
 	headFileMarshal, err := json.Marshal(fileHead)
+	if err != nil {
+		return err
+	}
 	lastFileMarshal, err := json.Marshal(finalFile)
+	if err != nil {
+		return err
+	}
 
 	if !oneFile {
-		err = EncryptHMACHelper(fileEncryptKey, fileEncryptKey, lastFileMarshal, fileHead.LastFile, fileLastHMACUUID)
+		err = EncryptHMACHelper(fileEncryptKey, fileHMACKey, lastFileMarshal, fileHead.LastFile, fileLastHMACUUID)
 		if err != nil {
 			return err
 		}
@@ -780,6 +784,7 @@ func (userdata *User) AppendToFile(filename string, content []byte) error {
 		//filedataByte is the File struct turned into a byte for storage
 		filedataByte, err := json.Marshal(fileArray[i])
 		//Error message
+
 		if err != nil {
 			return err
 		}
@@ -807,7 +812,7 @@ func (userdata *User) AppendToFile(filename string, content []byte) error {
 			return err
 		}
 
-		// Store the HMAC'd user struct on dataStore
+		// Store the HMAC'd struct on dataStore
 		userlib.DatastoreSet(HMACUUID, HMACValue)
 	}
 
