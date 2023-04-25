@@ -146,6 +146,8 @@ type Invitation struct {
 	RSAMacKey []byte
 	// RSA Encryption key
 	RSAEncryptKey []byte
+	// RSA macUUID key
+	RSAMacUUID []byte
 }
 
 type InvitationIntermediate struct {
@@ -333,6 +335,13 @@ func GetUser(username string, password string) (userdataptr *User, err error) {
 }
 
 func (userdata *User) StoreFile(filename string, content []byte) (err error) {
+	// FIRST GET USER
+	updatedUser, err := GetUser(userdata.Username, userdata.Password)
+	if err != nil {
+		return err
+	}
+	userdata = updatedUser
+	//
 
 	contentTotalLength := len(content)
 	fileStructNumber := 0
@@ -418,7 +427,7 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 				return err
 			}
 
-			fileIntermediateHMACUUID := userdata.InvitedFiles[filename+" HMACUUID"]
+			fileIntermediateHMACUUID := userdata.InvitedFiles[filename+"HMACUUID"]
 
 			actualFileIntermediateHMACEval, ok := userlib.DatastoreGet(fileIntermediateHMACUUID)
 			if ok == false {
@@ -651,6 +660,14 @@ func (userdata *User) StoreFile(filename string, content []byte) (err error) {
 
 func (userdata *User) AppendToFile(filename string, content []byte) error {
 
+	// FIRST GET USER
+	updatedUser, err := GetUser(userdata.Username, userdata.Password)
+	if err != nil {
+		return err
+	}
+	userdata = updatedUser
+	//
+
 	// Total length of bytes
 	contentTotalLength := len(content)
 	fileStructNumber := 0
@@ -808,6 +825,14 @@ func (userdata *User) LoadFile(filename string) (content []byte, err error) {
 	//owner case
 	//	Get intermediate uuid,
 
+	// FIRST GET USER
+	updatedUser, err := GetUser(userdata.Username, userdata.Password)
+	if err != nil {
+		return nil, err
+	}
+	userdata = updatedUser
+	//
+
 	if userdata.OwnedFiles[filename] == uuid.Nil && userdata.InvitedFiles[filename] == uuid.Nil {
 		return nil, errors.New("given filename dne in personal namespace of the caller")
 	}
@@ -874,7 +899,7 @@ func (userdata *User) LoadFile(filename string) (content []byte, err error) {
 			return nil, err
 		}
 
-		fileIntermediateHMACUUID := userdata.InvitedFiles[filename+" HMACUUID"]
+		fileIntermediateHMACUUID := userdata.InvitedFiles[filename+"HMACUUID"]
 
 		actualFileIntermediateHMACEval, ok := userlib.DatastoreGet(fileIntermediateHMACUUID)
 		if ok == false {
@@ -1006,10 +1031,30 @@ func (userdata *User) LoadFile(filename string) (content []byte, err error) {
 func (userdata *User) CreateInvitation(filename string, recipientUsername string) (
 	invitationPtr uuid.UUID, err error) {
 
+	// FIRST GET USER
+	updatedUser, err := GetUser(userdata.Username, userdata.Password)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	userdata = updatedUser
+	//
+
 	//Checks if filename exists in userspace
 	if userdata.InvitedFiles[filename] == uuid.Nil && userdata.OwnedFiles[filename] == uuid.Nil {
 		return uuid.Nil, errors.New("Filename does not exist in user filespace")
 	}
+
+	//Gets the recipient RSA for later
+	recipientRSA, ok := userlib.KeystoreGet(recipientUsername + "RSA")
+	if !ok {
+		return uuid.Nil, errors.New("Recipient User doesn't exist")
+	}
+
+	//Gets private sign key
+	privateSign := userdata.PrivateSignKey
+
+	//Initialize Invitation file
+	var newInvitation Invitation
 
 	//1st case, owner owns the file
 	if userdata.OwnedFiles[filename] != uuid.Nil {
@@ -1030,29 +1075,235 @@ func (userdata *User) CreateInvitation(filename string, recipientUsername string
 		newInvitationIntermediate.FileMACKey = currFileMacKey
 		newInvitationIntermediate.HMACUUIDSalt = currHMACUUIDSalt
 
+		// Generates keys and UUID values from userdata.password and filename
 		tempByte := userlib.Argon2Key([]byte(userdata.Password+filename), userlib.Hash([]byte(recipientUsername)), 16)
-		userlib.HashKDF(tempByte, "HMACKey")
-		userlib.HashKDF(tempByte, "HMACUUID")
-		userlib.HashKDF(tempByte, "EncKey")
-
-		newInvitationIntermediateUUID, err := uuid.FromBytes(invIntUUIDByte)
+		tempInvIntUUID, err := userlib.HashKDF(tempByte, []byte("UUID"))
+		if err != nil {
+			return uuid.Nil, err
+		}
+		tempInvIntHMACUUID, err := userlib.HashKDF(tempByte, []byte("HMACUUID"))
+		if err != nil {
+			return uuid.Nil, err
+		}
+		tempInvIntEncKey, err := userlib.HashKDF(tempByte, []byte("EncKey"))
+		if err != nil {
+			return uuid.Nil, err
+		}
+		tempInvIntHMACKey, err := userlib.HashKDF(tempByte, []byte("HMACKey"))
 		if err != nil {
 			return uuid.Nil, err
 		}
 
+		// Generated Values
+		newInvitationIntermediateUUID, err := uuid.FromBytes(tempInvIntUUID[0:16])
+		if err != nil {
+			return uuid.Nil, err
+		}
+		/* newInvitationIntermediateHMACUUID, err := uuid.FromBytes(tempInvIntHMACUUID[0:16])
+		if err != nil {
+			return uuid.Nil, err
+		}
+		newInvitationIntermediateEncKey, err := uuid.FromBytes(tempInvIntEncKey[0:16])
+		if err != nil {
+			return uuid.Nil, err
+		}
+		newInvitationIntermediateHMACKey, err := uuid.FromBytes(tempInvIntHMACKey[0:16])
+		if err != nil {
+			return uuid.Nil, err
+		} */
+
+		// Add values to invitation file
+		newInvIntUUIDRSA, err := userlib.PKEEnc(recipientRSA, tempInvIntUUID[0:16])
+		if err != nil {
+			return uuid.Nil, err
+		}
+		newInvitationIntermediateHMACUUIDRSA, err := userlib.PKEEnc(recipientRSA, tempInvIntHMACUUID[0:16])
+		if err != nil {
+			return uuid.Nil, err
+		}
+		newInvitationIntermediateEncKeyRSA, err := userlib.PKEEnc(recipientRSA, tempInvIntEncKey[0:16])
+		if err != nil {
+			return uuid.Nil, err
+		}
+		newInvitationIntermediateHMACKeyRSA, err := userlib.PKEEnc(recipientRSA, tempInvIntHMACKey[0:16])
+		if err != nil {
+			return uuid.Nil, err
+		}
+
+		//UUIDs for encrypting later
+		invIntHMACUUID, err := uuid.FromBytes(tempInvIntHMACUUID[0:16])
+		invIntUUID, err := uuid.FromBytes(tempInvIntUUID[0:16])
+
+		//Putting all necessary files in invitation
+		newInvitation.EncIntermediateUUID = newInvIntUUIDRSA
+		newInvitation.RSAEncryptKey = newInvitationIntermediateEncKeyRSA
+		newInvitation.RSAMacKey = newInvitationIntermediateHMACKeyRSA
+		newInvitation.RSAMacUUID = newInvitationIntermediateHMACUUIDRSA
+		signedMessage, err := userlib.DSSign(privateSign, []byte(userdata.Username))
+		if err != nil {
+			return uuid.Nil, err
+		}
+		newInvitation.Signature = signedMessage
+
+		//Encrypt and HMAC the invitation intermediate
+		newInvitationIntermediateBytes, err := json.Marshal(newInvitationIntermediate)
+		if err != nil {
+			return uuid.Nil, err
+		}
+		EncryptHMACHelper(tempInvIntEncKey[0:16], tempInvIntHMACKey[0:16], newInvitationIntermediateBytes, invIntUUID, invIntHMACUUID)
+
+		//Now we need to add values to fileIntermediate
+		currIntermediateFile.UserInvitations[recipientUsername] = newInvitationIntermediateUUID
+		currIntermediateFile.KeysIntermediateEncrypt[recipientUsername] = tempInvIntEncKey[0:16]
+		currIntermediateFile.KeysIntermediateHMAC[recipientUsername] = tempInvIntHMACKey[0:16]
+
+		currIntermediateFileUUID, err := userdata.OwnedFiles[filename]
+		userdata.FileHMAC
+		userdata.FileEncrypt
+		userdata.file
+
+		EncryptHMACHelper()
+
+		// Case 2 if not file owner
+		// TODO
 	} else {
 
 	}
+	//Store the invitation inside the datastore
 
-	return
+	invitationUUID := uuid.New()
+	newInvitationBytes, err := json.Marshal(newInvitation)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	userlib.DatastoreSet(invitationUUID, newInvitationBytes)
+
+	return invitationUUID, nil
 }
 
 func (userdata *User) AcceptInvitation(senderUsername string, invitationPtr uuid.UUID, filename string) error {
+	// FIRST GET USER
+	updatedUser, err := GetUser(userdata.Username, userdata.Password)
+	if err != nil {
+		return err
+	}
+	userdata = updatedUser
+	//
+	//Get invitation from invitationPtr
+	invitationBytes, ok := userlib.DatastoreGet(invitationPtr)
+	if !ok {
+		return errors.New("invitation doesn't exist")
+	}
+	//Checks if filename is already found in user storage dicts
+	if userdata.OwnedFiles[filename] != uuid.Nil || userdata.InvitedFiles[filename] != uuid.Nil {
+		return errors.New("Filename already exists")
+	}
+	//Need to check if revoked TODO
+
+	var invitation Invitation
+
+	json.Unmarshal(invitationBytes, &invitation)
+	// Check the signature
+	senderSign, ok := userlib.KeystoreGet(senderUsername + "Sign")
+	if !ok {
+		return errors.New("sender doesnt exist")
+	}
+	err = userlib.DSVerify(senderSign, []byte(senderUsername), invitation.Signature)
+	if err != nil {
+		return err
+	}
+
+	// Decrypting the RSA keys
+	if !ok {
+		return errors.New("User RSA doesnt exist")
+	}
+	intermediateEncKey, err := userlib.PKEDec(userdata.PrivateKey, invitation.RSAEncryptKey)
+	if err != nil {
+		return err
+	}
+	intermediateMacKey, err := userlib.PKEDec(userdata.PrivateKey, invitation.RSAMacKey)
+	if err != nil {
+		return err
+	}
+	intermediateUUIDTemp, err := userlib.PKEDec(userdata.PrivateKey, invitation.EncIntermediateUUID)
+	if err != nil {
+		return err
+	}
+	intermedaiteHMACUUIDTemp, err := userlib.PKEDec(userdata.PrivateKey, invitation.RSAMacUUID)
+	if err != nil {
+		return err
+	}
+
+	intermediateUUID, err := uuid.FromBytes(intermediateUUIDTemp)
+	intermediateHMACUUID, err := uuid.FromBytes(intermedaiteHMACUUIDTemp)
+
+	// HMAC and Decrypt the file
+	thisInvitationIntermediate, err := DecryptHMACInvInt(intermediateEncKey, intermediateMacKey, intermediateUUID, intermediateHMACUUID)
+	if err != nil {
+		return err
+	}
+
+	//Check if we have access to head of file
+	_, ok = userlib.DatastoreGet(thisInvitationIntermediate.FileHeadUUID)
+	if !ok {
+		return errors.New("Access to file revoked")
+	}
+
+	//Add items to userdata
+
+	userdata.InvitedFiles[filename] = intermediateUUID
+	userdata.FileEncrypt[intermediateUUID] = intermediateEncKey
+	userdata.FileHMAC[intermediateUUID] = intermediateMacKey
+	userdata.InvitedFiles[filename+"HMACUUID"] = intermediateHMACUUID
+
+	// Storing userdata in the datastore again
+	salt := userlib.Hash([]byte(userdata.Username))
+	userSourceKey := userlib.Argon2Key([]byte(userdata.Username+userdata.Password), salt, 16)
+	// MAYBE WE NEED TO UNPOINTER THE POINTER TODO MAYBE
+	userByte, err := json.Marshal(userdata)
+	if err != nil {
+		return err
+	}
+
+	userHMAC, userEnc, uuidHMAC, err := EncryptHMACHelperSource(userSourceKey, userByte)
+	if err != nil {
+		return err
+	}
+
+	newUserUUID, err := uuid.FromBytes(userSourceKey)
+	if err != nil {
+		return err
+	}
+
+	userlib.DatastoreSet(newUserUUID, userEnc)
+
+	userlib.DatastoreSet(uuidHMAC, userHMAC)
+
 	return nil
 }
 
 func (userdata *User) RevokeAccess(filename string, recipientUsername string) error {
+	// FIRST GET USER
+	updatedUser, err := GetUser(userdata.Username, userdata.Password)
+	if err != nil {
+		return err
+	}
+	userdata = updatedUser
+	//
+
+	//Obtain the file intermediate
+	userintermediateFile, err := updatedUser.GetIntermediateFile(filename)
+	if err != nil {
+		return err
+	}
+
 	return nil
+
+}
+
+func GetUpdatedUserdata(username string, password string) error {
+	return nil
+
 }
 
 func EncryptHMACHelperSource(sourcekey []byte, content []byte) ([]byte, []byte, uuid.UUID, error) {
@@ -1138,6 +1389,36 @@ func DecryptHMACHelper(encKey []byte, HMACKey []byte, fileUUID uuid.UUID, hmacSa
 	}
 
 	return fileBlock, fileHMACUUID, nil
+}
+
+func DecryptHMACInvInt(encKey []byte, HMACKey []byte, invIntUUID uuid.UUID, HMACUUID uuid.UUID) (invitationIntermediate InvitationIntermediate, err error) {
+	invIntEnc, ok := userlib.DatastoreGet(invIntUUID)
+	if !ok {
+		return InvitationIntermediate{}, errors.New("UUID does not point to an invint")
+	}
+
+	calulatedHMACValue, err := userlib.HMACEval(HMACKey, invIntEnc)
+	if err != nil {
+		return InvitationIntermediate{}, err
+	}
+
+	actualHMACValue, ok := userlib.DatastoreGet(HMACUUID)
+	if !ok {
+		return InvitationIntermediate{}, errors.New("ActualHMAC does not exist")
+	}
+
+	equal := userlib.HMACEqual(calulatedHMACValue, actualHMACValue)
+	if !equal {
+		return InvitationIntermediate{}, errors.New("HMACs are not equal")
+	}
+
+	invIntBytes := userlib.SymDec(encKey, invIntEnc)
+	err = json.Unmarshal(invIntBytes, &invitationIntermediate)
+	if err != nil {
+		return InvitationIntermediate{}, err
+	}
+
+	return invitationIntermediate, nil
 }
 
 func FileGeneratorHelper(fileStructNumber int, content []byte, slicelength int, fileEncryptKey []byte, fileHMACKey []byte, fileHMACSalt []byte, fileHeadUUID uuid.UUID) error {
@@ -1289,7 +1570,7 @@ func (userdata *User) GetHeadFile(filename string) ([]byte, []byte, uuid.UUID, [
 			return nil, nil, uuid.Nil, nil, File{}, err
 		}
 
-		fileIntermediateHMACUUID := userdata.InvitedFiles[filename+" HMACUUID"]
+		fileIntermediateHMACUUID := userdata.InvitedFiles[filename+"HMACUUID"]
 
 		actualFileIntermediateHMACEval, ok := userlib.DatastoreGet(fileIntermediateHMACUUID)
 		if ok == false {
@@ -1431,7 +1712,7 @@ func (userdata *User) GetInvitationIntermediate(filename string) (invitationInte
 		return InvitationIntermediate{}, err
 	}
 
-	fileIntermediateHMACUUID := userdata.InvitedFiles[filename+" HMACUUID"]
+	fileIntermediateHMACUUID := userdata.InvitedFiles[filename+"HMACUUID"]
 
 	actualFileIntermediateHMACEval, ok := userlib.DatastoreGet(fileIntermediateHMACUUID)
 	if ok == false {
