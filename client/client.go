@@ -120,13 +120,6 @@ type User struct {
 
 	// Map mapping file UUID to File HMAC key
 	FileHMAC map[uuid.UUID][]byte
-
-	// You can add other attributes here if you want! But note that in order for attributes to
-	// be included when this struct is serialized to/from JSON, they must be capitalized.
-	// On the flipside, if you have an attribute that you want to be able to access from
-	// this struct's methods, but you DON'T want that value to be included in the serialized value
-	// of this struct that's stored in datastore, then you can use a "private" variable (e.g. one that
-	// begins with a lowercase letter).
 }
 
 type File struct {
@@ -1615,6 +1608,9 @@ func EncryptHMACHelperSource(sourcekey []byte, content []byte) ([]byte, []byte, 
 		return nil, nil, uuid.New(), err
 	}
 	UUID, err := uuid.FromBytes(macKey[16:32])
+	if err != nil {
+		return nil, nil, uuid.New(), err
+	}
 
 	return HMAC, contentEnc, UUID, nil
 }
@@ -1780,6 +1776,9 @@ func FileGeneratorHelper(fileStructNumber int, content []byte, slicelength int, 
 		generatedHMACUUID := userlib.Argon2Key(UUIDValue, userlib.Hash(fileHMACSalt), 16)
 
 		HMACUUID, err := uuid.FromBytes(generatedHMACUUID)
+		if err != nil {
+			return err
+		}
 
 		// Store the HMAC'd user struct on dataStore
 		userlib.DatastoreSet(HMACUUID, HMACValue)
