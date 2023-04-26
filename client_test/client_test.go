@@ -659,5 +659,84 @@ var _ = Describe("Client Tests", func() {
 
 		})
 
+		Specify("Advanced test: Tampering Invite", func() {
+			contentFour := strings.Repeat("ASDA", 60)
+			userlib.DebugMsg("Initializing user Alice.")
+			alice, err = client.InitUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+
+			userlib.DebugMsg("Initializing user bob.")
+			bob, err = client.InitUser("bob", defaultPassword)
+			Expect(err).To(BeNil())
+
+			userlib.DebugMsg("Initializing user charles.")
+			charles, err = client.InitUser("charles", defaultPassword)
+			Expect(err).To(BeNil())
+
+			userlib.DebugMsg("Getting user Alice.")
+			aliceLaptop, err = client.GetUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+
+			userlib.DebugMsg("Storing file data: %s", contentFour)
+			err = alice.StoreFile(aliceFile, []byte(contentFour))
+			Expect(err).To(BeNil())
+
+			userlib.DebugMsg("Loading file...")
+			data, err := alice.LoadFile(aliceFile)
+			Expect(err).To(BeNil())
+			Expect(data).To(Equal([]byte(contentFour)))
+
+			bobptr, err := alice.CreateInvitation(aliceFile, "bob")
+			Expect(err).To(BeNil())
+			charptr, err := alice.CreateInvitation(aliceFile, "charles")
+			Expect(err).To(BeNil())
+			err = bob.AcceptInvitation("alice", bobptr, bobFile)
+			Expect(err).To(BeNil())
+			err = charles.AcceptInvitation("alice", charptr, charlesFile)
+			Expect(err).To(BeNil())
+
+			datastoreMap := userlib.DatastoreGetMap()
+			keys := make([]uuid.UUID, 0, len(datastoreMap))
+			for u := range datastoreMap {
+				keys = append(keys, u)
+			}
+
+			for i := 0; i < len(keys); i += 1 {
+				if i == len(keys)-1 {
+					item, _ := userlib.DatastoreGet(keys[0])
+					userlib.DatastoreSet(keys[i], item)
+				} else {
+					item, _ := userlib.DatastoreGet(keys[i+1])
+					userlib.DatastoreSet(keys[i], item)
+				}
+
+			}
+
+			userlib.DebugMsg("Getting user Alice.")
+			_, err2 := client.GetUser("alice", defaultPassword)
+
+			userlib.DebugMsg("Loading file...")
+			data, err1 := alice.LoadFile(aliceFile)
+
+			userlib.DebugMsg("append file...")
+			err3 := alice.AppendToFile(aliceFile, []byte(contentOne))
+
+			userlib.DebugMsg("Getting user Alice.")
+			_, err4 := client.GetUser("bob", defaultPassword)
+
+			userlib.DebugMsg("Loading file...")
+			data, err5 := bob.LoadFile(aliceFile)
+
+			userlib.DebugMsg("append file...")
+			err6 := bob.AppendToFile(aliceFile, []byte(contentOne))
+
+			err7 := alice.RevokeAccess(aliceFile, "bob")
+
+			if err1 == nil && err2 == nil && err3 == nil && err4 == nil && err5 == nil && err6 == nil && err7 == nil {
+				Expect(err1).NotTo(BeNil())
+			}
+
+		})
+
 	})
 })
