@@ -649,8 +649,11 @@ var _ = Describe("Client Tests", func() {
 			userlib.DebugMsg("Loading file...")
 			data, err1 := alice.LoadFile(aliceFile)
 
-			if err1 == nil && err2 == nil {
-				Expect(err).NotTo(BeNil())
+			userlib.DebugMsg("append file...")
+			err3 := alice.AppendToFile(aliceFile, []byte(contentOne))
+
+			if err1 == nil && err2 == nil && err3 == nil {
+				Expect(err1).NotTo(BeNil())
 
 			}
 
