@@ -1157,16 +1157,84 @@ func (userdata *User) CreateInvitation(filename string, recipientUsername string
 		currIntermediateFile.KeysIntermediateEncrypt[recipientUsername] = tempInvIntEncKey[0:16]
 		currIntermediateFile.KeysIntermediateHMAC[recipientUsername] = tempInvIntHMACKey[0:16]
 
-		currIntermediateFileUUID, err := userdata.OwnedFiles[filename]
-		userdata.FileHMAC
-		userdata.FileEncrypt
-		userdata.file
+		currIntermediateFileUUID := userdata.OwnedFiles[filename]
+		currIntermediateFileMacKey := userdata.FileHMAC[currIntermediateFileUUID]
+		currIntermediateFileEncKey := userdata.FileEncrypt[currIntermediateFileUUID]
 
-		EncryptHMACHelper()
+		fileIntermediateHMACUUIDTemp := userlib.Argon2Key([]byte(userdata.Password+filename), userlib.Hash(currIntermediateFileMacKey), 16)
+		currIntermediateFileHMACUUID, err := uuid.FromBytes(fileIntermediateHMACUUIDTemp)
+		if err != nil {
+			return uuid.Nil, err
+		}
+
+		currIntermediateFileBytes, err := json.Marshal(currIntermediateFile)
+		if err != nil {
+			return uuid.Nil, err
+		}
+
+		err = EncryptHMACHelper(currIntermediateFileEncKey, currIntermediateFileMacKey, currIntermediateFileBytes, currIntermediateFileUUID, currIntermediateFileHMACUUID)
+		if err != nil {
+			return uuid.Nil, err
+		}
 
 		// Case 2 if not file owner
 		// TODO
 	} else {
+		//Get the invitation intermediate items
+
+		_, err := updatedUser.GetInvitationIntermediate(filename)
+
+		if err != nil {
+			return uuid.Nil, err
+		}
+		currInvitationIntermediateUUID := userdata.InvitedFiles[filename]
+		currInvitationIntermediateEncKey := userdata.FileEncrypt[currInvitationIntermediateUUID]
+		currInvitationIntermediateMacKey := userdata.FileHMAC[currInvitationIntermediateUUID]
+		currInvitationIntermediateHMACUUID := userdata.InvitedFiles[filename+"HMACUUID"]
+
+		currInvitationIntermediateUUIDByte, err := json.Marshal(currInvitationIntermediateUUID)
+		if err != nil {
+			return uuid.Nil, err
+		}
+		currInvitationIntermediateHMACUUIDByte, err := json.Marshal(currInvitationIntermediateHMACUUID)
+		if err != nil {
+			return uuid.Nil, err
+		}
+
+		//public RSA and private sign
+		userSign := userdata.PrivateSignKey
+		recipientRSA, ok := userlib.KeystoreGet(recipientUsername + "RSA")
+		if !ok {
+			return uuid.Nil, errors.New("The Recipientusername RSA doesnt exist (odd problem take closer look)")
+		}
+
+		invIntEncKeyRSA, err := userlib.PKEEnc(recipientRSA, currInvitationIntermediateEncKey)
+		if err != nil {
+			return uuid.Nil, err
+		}
+		invIntMacKeyRSA, err := userlib.PKEEnc(recipientRSA, currInvitationIntermediateMacKey)
+		if err != nil {
+			return uuid.Nil, err
+		}
+		invIntUUIDRSA, err := userlib.PKEEnc(recipientRSA, currInvitationIntermediateUUIDByte)
+		if err != nil {
+			return uuid.Nil, err
+		}
+		invIntHMACUUIDRSA, err := userlib.PKEEnc(recipientRSA, currInvitationIntermediateHMACUUIDByte)
+		if err != nil {
+			return uuid.Nil, err
+		}
+
+		signedKey, err := userlib.DSSign(userSign, []byte(userdata.Username))
+		if err != nil {
+			return uuid.Nil, err
+		}
+
+		newInvitation.EncIntermediateUUID = invIntUUIDRSA
+		newInvitation.RSAEncryptKey = invIntEncKeyRSA
+		newInvitation.RSAMacKey = invIntMacKeyRSA
+		newInvitation.RSAMacUUID = invIntHMACUUIDRSA
+		newInvitation.Signature = signedKey
 
 	}
 	//Store the invitation inside the datastore
@@ -1291,17 +1359,13 @@ func (userdata *User) RevokeAccess(filename string, recipientUsername string) er
 	userdata = updatedUser
 	//
 
-	//Obtain the file intermediate
+	/* //Obtain the file intermediate
 	userintermediateFile, err := updatedUser.GetIntermediateFile(filename)
 	if err != nil {
 		return err
 	}
+	print(userintermediateFile) */
 
-	return nil
-
-}
-
-func GetUpdatedUserdata(username string, password string) error {
 	return nil
 
 }
