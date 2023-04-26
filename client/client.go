@@ -1099,25 +1099,27 @@ func (userdata *User) CreateInvitation(filename string, recipientUsername string
 		if err != nil {
 			return uuid.Nil, err
 		}
-		/* newInvitationIntermediateHMACUUID, err := uuid.FromBytes(tempInvIntHMACUUID[0:16])
+
+		newInvitationIntermediateHMACUUID, err := uuid.FromBytes(tempInvIntHMACUUID[0:16])
 		if err != nil {
 			return uuid.Nil, err
 		}
-		newInvitationIntermediateEncKey, err := uuid.FromBytes(tempInvIntEncKey[0:16])
+
+		marshaledInvIntUUID, err := json.Marshal(newInvitationIntermediateUUID)
 		if err != nil {
 			return uuid.Nil, err
 		}
-		newInvitationIntermediateHMACKey, err := uuid.FromBytes(tempInvIntHMACKey[0:16])
+		marshaledInvIntHMACUUID, err := json.Marshal(newInvitationIntermediateHMACUUID)
 		if err != nil {
 			return uuid.Nil, err
-		} */
+		}
 
 		// Add values to invitation file
-		newInvIntUUIDRSA, err := userlib.PKEEnc(recipientRSA, tempInvIntUUID[0:16])
+		newInvIntUUIDRSA, err := userlib.PKEEnc(recipientRSA, marshaledInvIntUUID)
 		if err != nil {
 			return uuid.Nil, err
 		}
-		newInvitationIntermediateHMACUUIDRSA, err := userlib.PKEEnc(recipientRSA, tempInvIntHMACUUID[0:16])
+		newInvitationIntermediateHMACUUIDRSA, err := userlib.PKEEnc(recipientRSA, marshaledInvIntHMACUUID)
 		if err != nil {
 			return uuid.Nil, err
 		}
@@ -1302,8 +1304,14 @@ func (userdata *User) AcceptInvitation(senderUsername string, invitationPtr uuid
 		return err
 	}
 
-	intermediateUUID, err := uuid.FromBytes(intermediateUUIDTemp)
-	intermediateHMACUUID, err := uuid.FromBytes(intermedaiteHMACUUIDTemp)
+	var intermediateUUID uuid.UUID
+	var intermediateHMACUUID uuid.UUID
+
+	json.Unmarshal(intermediateUUIDTemp, &intermediateUUID)
+	json.Unmarshal(intermedaiteHMACUUIDTemp, &intermediateHMACUUID)
+
+	/* 	intermediateUUID, err := uuid.FromBytes(intermediateUUIDTemp)
+	   	intermediateHMACUUID, err := uuid.FromBytes(intermedaiteHMACUUIDTemp) */
 
 	// HMAC and Decrypt the file
 	thisInvitationIntermediate, err := DecryptHMACInvInt(intermediateEncKey, intermediateMacKey, intermediateUUID, intermediateHMACUUID)
@@ -1357,14 +1365,126 @@ func (userdata *User) RevokeAccess(filename string, recipientUsername string) er
 		return err
 	}
 	userdata = updatedUser
-	//
 
-	/* //Obtain the file intermediate
+	//Obtain the file intermediate
 	userintermediateFile, err := updatedUser.GetIntermediateFile(filename)
 	if err != nil {
 		return err
 	}
-	print(userintermediateFile) */
+
+	//Make sure the user we are trying to revoke from actually exists
+	_, ok := userintermediateFile.UserInvitations[recipientUsername]
+	if !ok {
+		return errors.New("Recipient user does not exist")
+	}
+
+	//Iterate through all storefiles and change the uuid for each item
+	headFileEncryptKey, headFileHMACKey, headFileUUID, headFileHMACSalt, headFile, err := userdata.GetHeadFile(filename)
+	if err != nil {
+		return err
+	}
+
+	//Delete the Head file UUID and HMACUUID
+	userlib.DatastoreDelete(headFileUUID)
+	userlib.DatastoreDelete(userintermediateFile.FileUUID)
+
+	previousFile := headFile
+	currFileUUID := headFile.NextFile
+
+	// Make sure that the lastfile pointer is Nil in case we only have the head block
+	headFile.LastFile = uuid.Nil
+
+	fileBlocks := make([]File, 0)
+	fileUUIDS := make([]uuid.UUID, 0)
+
+	/* fileBlocks = append(fileBlocks, headFile) */
+	fileUUIDS = append(fileUUIDS, headFileUUID)
+
+	for currFileUUID != uuid.Nil {
+		//Creates new UUID and set it as the previous file's NextFile
+		newFileUUID := uuid.New()
+		previousFile.NextFile = newFileUUID
+
+		//Get the current file from currFileUUID
+		currFileBlock, currHMACUUID, err := DecryptHMACHelper(headFileEncryptKey, headFileHMACKey, currFileUUID, headFileHMACSalt)
+		if err != nil {
+			return err
+		}
+
+		//Deletes the HMACUUID and currfileUUID
+		userlib.DatastoreDelete(currHMACUUID)
+		userlib.DatastoreDelete(currFileUUID)
+
+		//Appending the previous file block and the new file uuid
+		fileUUIDS = append(fileUUIDS, newFileUUID)
+		fileBlocks = append(fileBlocks, previousFile)
+
+		//For Base case
+		if currFileBlock.NextFile == uuid.Nil {
+			fileBlocks[0].LastFile = currFileUUID
+		}
+
+		//Iteration
+		currFileUUID = currFileBlock.NextFile
+		previousFile = currFileBlock
+
+	}
+
+	fileBlocks = append(fileBlocks, previousFile)
+
+	print(len(fileBlocks))
+	print(len(fileUUIDS))
+
+	// We have to reencrypt and remac everything
+
+	// Generate new Enc, HMAC and HMACSalts
+	newEncKey := userlib.RandomBytes(16)
+	newHMACKey := userlib.RandomBytes(16)
+	newHMACSalt := userlib.RandomBytes(32)
+
+	// This means changing the enc and mac keys and also changing the hmacuuidsalt
+	totalBlocks := len(fileBlocks)
+	for i := 0; i < totalBlocks; i += 1 {
+		currFileBlock := fileBlocks[i]
+		currUUID := fileUUIDS[i]
+
+		//Turn current Block into []byte
+		currFileBlockByte, err := json.Marshal(currFileBlock)
+		if err != nil {
+			return err
+		}
+
+		UUIDValue, err := json.Marshal(currUUID)
+		if err != nil {
+			return err
+		}
+
+		generatedHMACUUID := userlib.Argon2Key(UUIDValue, userlib.Hash(newHMACSalt), 16)
+		currHMACUUID, err := uuid.FromBytes(generatedHMACUUID)
+		if err != nil {
+			return err
+		}
+
+		err = EncryptHMACHelper(newEncKey, newHMACKey, currFileBlockByte, currUUID, currHMACUUID)
+		if err != nil {
+			return err
+		}
+
+	}
+
+	//Delete the user from the invitations list
+	delete(userintermediateFile.UserInvitations, recipientUsername)
+
+	//Go through all Invitational intermediates and change accordingly
+	keys := make([]string, 0, len(userintermediateFile.UserInvitations))
+	for k := range userintermediateFile.UserInvitations {
+		keys = append(keys, k)
+	}
+
+	for i := 0; i < len(keys); i += 1 {
+		currUser := keys[i]
+		userIntInv := userintermediateFile.UserInvitations[currUser]
+	}
 
 	return nil
 
