@@ -644,10 +644,10 @@ var _ = Describe("Client Tests", func() {
 			}
 
 			userlib.DebugMsg("Getting user Alice.")
-			aliceLaptop, err2 := client.GetUser("alice", defaultPassword)
+			_, err2 := client.GetUser("alice", defaultPassword)
 
 			userlib.DebugMsg("Loading file...")
-			data, err1 := aliceLaptop.LoadFile(aliceFile)
+			data, err1 := alice.LoadFile(aliceFile)
 
 			if err1 == nil && err2 == nil {
 				Expect(err).NotTo(BeNil())
