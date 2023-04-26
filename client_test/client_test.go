@@ -738,5 +738,48 @@ var _ = Describe("Client Tests", func() {
 
 		})
 
+		Specify("Advanced test: runtime test", func() {
+			measureBandwidth := func() (bandwidth int) {
+				before := userlib.DatastoreGetBandwidth()
+				alice.AppendToFile(aliceFile, []byte(contentOne))
+				after := userlib.DatastoreGetBandwidth()
+				return after - before
+			}
+
+			contentFour := strings.Repeat("ASDA", 60)
+
+			userlib.DebugMsg("Initializing user Alice.")
+			alice, err = client.InitUser("alice", defaultPassword)
+			Expect(err).To(BeNil())
+
+			userlib.DebugMsg("Storing file data: %s", contentFour)
+			err = alice.StoreFile(aliceFile, []byte(contentFour))
+			Expect(err).To(BeNil())
+
+			bandwitdth1 := measureBandwidth()
+			bandwitdth2 := measureBandwidth()
+			bandwitdth3 := measureBandwidth()
+			bandwitdth4 := measureBandwidth()
+			bandwitdth5 := measureBandwidth()
+			bandwitdth6 := measureBandwidth()
+			bandwitdth7 := measureBandwidth()
+			bandwitdth8 := measureBandwidth()
+			bandwitdth9 := measureBandwidth()
+
+			print(bandwitdth1)
+			print(bandwitdth2)
+			print(bandwitdth3)
+			print(bandwitdth4)
+			print(bandwitdth5)
+			print(bandwitdth6)
+			print(bandwitdth7)
+			print(bandwitdth8)
+			print(bandwitdth9)
+			if bandwitdth2-bandwitdth9 > 0 {
+				Expect(err).ToNot(BeNil())
+			}
+
+		})
+
 	})
 })
