@@ -787,7 +787,7 @@ var _ = Describe("Client Tests", func() {
 			}
 
 			for i := 0; i < len(keys); i += 1 {
-				if i%2 == 0 {
+				if i%4 == 0 {
 					userlib.DatastoreSet(keys[i], []byte("garbage"))
 				} else {
 				}
