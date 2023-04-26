@@ -190,13 +190,13 @@ type FileIntermediate struct {
 func InitUser(username string, password string) (userdataptr *User, err error) {
 	// check if empty username is provided
 	if username == "" {
-		panic(errors.New("An empty username was provided please provide username of length of at least 1"))
+		return nil, errors.New("An empty username was provided please provide username of length of at least 1")
 	}
 	// check if a user with the username already exists
 	userCheck := username + "RSA"
 	_, ok := userlib.KeystoreGet(userCheck)
 	if ok == true {
-		panic(errors.New("The username already exists"))
+		return nil, errors.New("The username already exists")
 	}
 	//We initialize a new User struct here
 	var userdata User
@@ -231,14 +231,14 @@ func InitUser(username string, password string) (userdataptr *User, err error) {
 	userByte := userlib.Argon2Key([]byte(username+password), salt, 16)
 	userUUID, err := uuid.FromBytes(userByte)
 	if err != nil {
-		panic(errors.New("An error occurred while generating a UUID: " + err.Error()))
+		return nil, errors.New("An error occurred while generating a UUID: " + err.Error())
 	}
 
 	//userdataByte is the User struct turned into a byte for storage
 	userdataByte, err := json.Marshal(userdata)
 	//Error message
 	if err != nil {
-		panic(errors.New("An error occurred while converting User struct to []bytes: " + err.Error()))
+		return nil, errors.New("An error occurred while converting User struct to []bytes: " + err.Error())
 	}
 
 	//TODO: Encrypt User Struct
@@ -281,7 +281,7 @@ func GetUser(username string, password string) (userdataptr *User, err error) {
 	userByte := userlib.Argon2Key([]byte(username+password), salt, 16)
 	userUUID, err := uuid.FromBytes(userByte)
 	if err != nil {
-		panic(errors.New("An error occurred while generating a UUID: " + err.Error()))
+		return nil, errors.New("An error occurred while generating a UUID: " + err.Error())
 	}
 
 	userdataByteEnc, exists := userlib.DatastoreGet(userUUID)
@@ -1320,8 +1320,12 @@ func (userdata *User) AcceptInvitation(senderUsername string, invitationPtr uuid
 	}
 
 	//Check if we have access to head of file
-	_, ok = userlib.DatastoreGet(thisInvitationIntermediate.FileHeadUUID)
+	test, ok := userlib.DatastoreGet(thisInvitationIntermediate.FileHeadUUID)
 	if !ok {
+		return errors.New("Access to file revoked")
+	}
+
+	if test == nil {
 		return errors.New("Access to file revoked")
 	}
 
@@ -1398,7 +1402,7 @@ func (userdata *User) RevokeAccess(filename string, recipientUsername string) er
 	fileUUIDS := make([]uuid.UUID, 0)
 
 	/* fileBlocks = append(fileBlocks, headFile) */
-	fileUUIDS = append(fileUUIDS, headFileUUID)
+	fileUUIDS = append(fileUUIDS, uuid.New())
 
 	for currFileUUID != uuid.Nil {
 		//Creates new UUID and set it as the previous file's NextFile
@@ -1474,6 +1478,8 @@ func (userdata *User) RevokeAccess(filename string, recipientUsername string) er
 
 	//Delete the user from the invitations list
 	delete(userintermediateFile.UserInvitations, recipientUsername)
+	delete(userintermediateFile.KeysIntermediateEncrypt, recipientUsername)
+	delete(userintermediateFile.KeysIntermediateHMAC, recipientUsername)
 
 	//Go through all Invitational intermediates and change accordingly
 	keys := make([]string, 0, len(userintermediateFile.UserInvitations))
@@ -1483,7 +1489,104 @@ func (userdata *User) RevokeAccess(filename string, recipientUsername string) er
 
 	for i := 0; i < len(keys); i += 1 {
 		currUser := keys[i]
+		// Get the user IntInv from keystore
 		userIntInv := userintermediateFile.UserInvitations[currUser]
+		sharedIntInvByte, ok := userlib.DatastoreGet(userIntInv)
+		if !ok {
+			return errors.New("Unable to retrive user IntInv from keystore")
+		}
+
+		// Generates keys and UUID values from userdata.password and filename
+		tempByte := userlib.Argon2Key([]byte(userdata.Password+filename), userlib.Hash([]byte(keys[i])), 16)
+		/* tempInvIntUUID, err := userlib.HashKDF(tempByte, []byte("UUID")) */
+		if err != nil {
+			return err
+		}
+		tempInvIntHMACUUID, err := userlib.HashKDF(tempByte, []byte("HMACUUID"))
+		if err != nil {
+			return err
+		}
+		tempInvIntEncKey, err := userlib.HashKDF(tempByte, []byte("EncKey"))
+		if err != nil {
+			return err
+		}
+		tempInvIntHMACKey, err := userlib.HashKDF(tempByte, []byte("HMACKey"))
+		if err != nil {
+			return err
+		}
+		//UUIDs for encrypting later
+		invIntHMACUUID, err := uuid.FromBytes(tempInvIntHMACUUID[0:16])
+		/* invIntUUID, err := uuid.FromBytes(tempInvIntUUID[0:16]) */
+
+		invIntHMACKey := tempInvIntHMACKey[0:16]
+		invIntEncKey := tempInvIntEncKey[0:16]
+
+		HMACEvalValue, err := userlib.HMACEval(invIntHMACKey, sharedIntInvByte)
+		if err != nil {
+			return err
+		}
+
+		HMACAcutalValue, ok := userlib.DatastoreGet(invIntHMACUUID)
+		if !ok {
+			return errors.New("Unable to retrive user IntInvHMAC from keystore")
+		}
+
+		equal := userlib.HMACEqual(HMACAcutalValue, HMACEvalValue)
+		if !equal {
+			return errors.New("HMAC actual not equal to HMAC equal")
+		}
+
+		//Decrypt the value
+		var sharedInvInt InvitationIntermediate
+
+		sharedInvIntDec := userlib.SymDec(invIntEncKey, sharedIntInvByte)
+		err = json.Unmarshal(sharedInvIntDec, &sharedInvInt)
+		if err != nil {
+			return err
+		}
+
+		//Assign new values and reencrypt
+		sharedInvInt.FileEncryptKey = newEncKey
+		sharedInvInt.FileMACKey = newHMACKey
+		sharedInvInt.HMACUUIDSalt = newHMACSalt
+		sharedInvInt.FileHeadUUID = fileUUIDS[0]
+
+		sharedInvIntMarshaled, err := json.Marshal(sharedInvInt)
+		if err != nil {
+			return err
+		}
+
+		err = EncryptHMACHelper(invIntEncKey, invIntHMACKey, sharedInvIntMarshaled, userIntInv, invIntHMACUUID)
+		if err != nil {
+			return err
+		}
+
+	}
+
+	//Change User intermediate and encrypt + HMAC it
+	userintermediateFile.FileEncrypt = newEncKey
+	userintermediateFile.FileMac = newHMACKey
+	userintermediateFile.HMACUUIDSalt = newHMACSalt
+	userintermediateFile.FileUUID = fileUUIDS[0]
+
+	fileIntermediateUUID := userdata.OwnedFiles[filename]
+	fileIntermediateEncKey := userdata.FileEncrypt[fileIntermediateUUID]
+	fileIntermediateHMACKey := userdata.FileHMAC[fileIntermediateUUID]
+
+	fileIntermediateHMACUUIDTemp := userlib.Argon2Key([]byte(userdata.Password+filename), userlib.Hash(fileIntermediateHMACKey), 16)
+	fileIntermediateHMACUUID, err := uuid.FromBytes(fileIntermediateHMACUUIDTemp)
+	if err != nil {
+		return err
+	}
+
+	userintermediateFileByte, err := json.Marshal(userintermediateFile)
+	if err != nil {
+		return err
+	}
+
+	err = EncryptHMACHelper(fileIntermediateEncKey, fileIntermediateHMACKey, userintermediateFileByte, fileIntermediateUUID, fileIntermediateHMACUUID)
+	if err != nil {
+		return err
 	}
 
 	return nil
