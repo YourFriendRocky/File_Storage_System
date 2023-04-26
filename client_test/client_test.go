@@ -696,17 +696,19 @@ var _ = Describe("Client Tests", func() {
 			Expect(err).To(BeNil())
 
 			datastoreMap := userlib.DatastoreGetMap()
+			datastoreCopy := make(map[uuid.UUID][]byte)
 			keys := make([]uuid.UUID, 0, len(datastoreMap))
 			for u := range datastoreMap {
 				keys = append(keys, u)
+				datastoreCopy[u] = datastoreMap[u]
 			}
 
 			for i := 0; i < len(keys); i += 1 {
 				if i == len(keys)-1 {
-					item, _ := userlib.DatastoreGet(keys[0])
+					item, _ := datastoreCopy[keys[0]]
 					userlib.DatastoreSet(keys[i], item)
 				} else {
-					item, _ := userlib.DatastoreGet(keys[i+1])
+					item, _ := datastoreCopy[keys[i+1]]
 					userlib.DatastoreSet(keys[i], item)
 				}
 
